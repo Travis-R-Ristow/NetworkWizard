@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header class="panel-header">
+    <h1 class="text-xl font-medium">NetworkWizard</h1>
+    <nav class="flex items-center gap-md">
+      <button id="clearBtn" class="btn btn-secondary">Clear</button>
+      <label class="toggle">
+        <input type="checkbox" id="recordToggle" checked>
+        <span class="text-muted">Recording</span>
+      </label>
+    </nav>
+  </header>
+  <nav class="filter-bar">
+    <input type="text" id="searchInput" class="search-input" placeholder="Search calls...">
+    <div class="filter-group">
+      <button class="filter-btn active" data-filter="type" data-value="all">All</button>
+      <button class="filter-btn" data-filter="type" data-value="REST">REST</button>
+      <button class="filter-btn" data-filter="type" data-value="GQL">GQL</button>
+    </div>
+    <div class="filter-chips" id="methodFilter"></div>
+    <div class="filter-group">
+      <button class="filter-btn active" data-filter="status" data-value="all">Any Status</button>
+      <button class="filter-btn" data-filter="status" data-value="success">Success</button>
+      <button class="filter-btn" data-filter="status" data-value="error">Error</button>
+    </div>
+  </nav>
+  <main>
+    <table class="table" id="networkTable">
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Method</th>
+          <th>Call Name</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="networkBody"></tbody>
+    </table>
+    <section class="empty-state" id="emptyState">
+      <p class="text-lg">No network calls captured yet.</p>
+      <p class="text-muted">Make requests on the page to see them here.</p>
+    </section>
+  </main>
+  <aside class="status-drawer collapsed" id="statusDrawer">
+    <header class="status-drawer-header" id="statusDrawerToggle">
+      <span id="statusText">Ready</span>
+      <span class="status-drawer-toggle">▲</span>
+    </header>
+    <section class="status-drawer-content">
+      <ul class="event-list" id="eventList"></ul>
+    </section>
+  </aside>
+  <script src="panel.js"></script>
+</body>
+</html>
