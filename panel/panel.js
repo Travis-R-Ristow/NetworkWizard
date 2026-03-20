@@ -1614,7 +1614,13 @@ class NetworkWizardPanel {
     const body = override.responseBody || '{}';
     const encoder = new TextEncoder();
     const bytes = encoder.encode(body);
-    const bodyBase64 = btoa(String.fromCharCode(...bytes));
+    let binary = '';
+    const chunkSize = 8192;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode.apply(null, chunk);
+    }
+    const bodyBase64 = btoa(binary);
 
     chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.fulfillRequest', {
       requestId,
