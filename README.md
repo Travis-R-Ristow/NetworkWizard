@@ -13,12 +13,12 @@ A Chrome DevTools extension for monitoring, analyzing, and debugging network req
 - ⚡ **Real-time Updates** - Live capture with recording toggle
 - 🔮 **GraphQL Error Detection** - Identifies GQL errors even on 200 responses
 - 🚫 **Request Blocking** - Block specific REST URLs or GraphQL operations (persisted per origin)
+- 🎭 **Response Override** - Mock responses with custom status, headers, and body (persisted per origin)
+- 📥 **Import/Export** - Import and export override configurations
 
 ### 🚧 Coming Soon
 
-- 🎭 **Response Override** - Mock responses for testing
 - 🐢 **Response Delay** - Simulate slow network conditions
-- 💾 **Export/Import** - Save and load captured requests
 
 ## 📦 Installation
 
@@ -47,7 +47,7 @@ Click any row to expand and view:
 
 ### Actions
 
-- **Override** - Override response (coming soon)
+- **Override** - Create/edit response override (opens Overrides tab)
 - **Block** - Block requests from being sent
 - **Copy cURL** - Generate and copy cURL command from kebab menu
 
@@ -61,6 +61,19 @@ Click any row to expand and view:
 - Use the **Blocked** tab to view and manage all blocked calls
 - Toggle blocking on/off without removing from the list
 - Blocked calls persist per origin and restore on reload
+
+### Managing Overrides
+
+- Use the **Overrides** tab to view and manage all response overrides
+- Click any override row to expand and edit:
+  - **Match Params/Variables** - Override only specific requests (by query params or GQL variables)
+  - **Status** - Custom status code and text (leave empty to keep original)
+  - **Response Headers** - Edit as key-value pairs or raw JSON
+  - **Response Body** - Custom response JSON
+- Toggle overrides on/off without deleting configuration
+- Import response body JSON or full override configuration
+- Export individual overrides or all at once
+- Overrides persist per origin and restore on reload
 
 ## 📁 Project Structure
 
@@ -80,6 +93,6 @@ NetworkWizard/
 ## 🔐 Permissions
 
 - `webRequest` - Capture pending requests as they start
-- `debugger` - Required for blocking requests and future override functionality
-- `storage` - Persist blocked calls across sessions
+- `debugger` - Required for blocking requests and overriding responses
+- `storage` - Persist blocked calls and overrides across sessions
 - `<all_urls>` - Required to capture requests from any domain
