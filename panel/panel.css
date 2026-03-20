@@ -65,6 +65,58 @@ body {
   border-bottom: 1px solid var(--color-border);
 }
 
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.header-tabs {
+  display: flex;
+  gap: 2px;
+  margin-left: var(--space-md);
+}
+
+.header-tab {
+  padding: var(--space-xs) var(--space-md);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius);
+  color: var(--color-text-muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.header-tab:hover {
+  color: var(--color-text);
+  background: var(--color-bg-hover);
+}
+
+.header-tab.active {
+  color: var(--color-primary);
+  background: rgba(0, 122, 204, 0.1);
+}
+
+.view-container {
+  display: block;
+}
+
+.view-container.hidden {
+  display: none;
+}
+
+.view-content {
+  padding: var(--space-md) 10vw;
+}
+
+.view-header {
+  margin-bottom: var(--space-md);
+}
+
+.view-header h2 {
+  margin-bottom: var(--space-xs);
+}
+
 .filter-bar {
   position: sticky;
   top: 48px;
@@ -361,6 +413,12 @@ body {
   color: #fff;
 }
 
+.btn-danger,
+.btn-unblock {
+  min-width: 70px;
+  text-align: center;
+}
+
 .btn-danger {
   background: transparent;
   color: var(--color-danger);
@@ -369,6 +427,17 @@ body {
 
 .btn-danger:hover {
   background: var(--color-danger);
+  color: #fff;
+}
+
+.btn-unblock {
+  background: transparent;
+  color: var(--color-success);
+  border: 1px solid var(--color-success);
+}
+
+.btn-unblock:hover {
+  background: var(--color-success);
   color: #fff;
 }
 
@@ -397,6 +466,24 @@ body {
 .table {
   width: 100%;
   border-collapse: collapse;
+}
+
+.table th:first-child,
+.table td:first-child,
+.table th:last-child,
+.table td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.table .method-cell {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.table td:nth-child(4) {
+  width: 1%;
+  white-space: nowrap;
 }
 
 .table th,
@@ -436,6 +523,15 @@ body {
 
 .table tbody tr.call-row.pending .call-name {
   color: var(--color-text-muted);
+}
+
+.table tbody tr.call-row.blocked {
+  background: rgba(197, 48, 48, 0.1);
+}
+
+.table tbody tr.call-row.blocked .call-name {
+  text-decoration: line-through;
+  color: var(--color-danger);
 }
 
 .spinner {

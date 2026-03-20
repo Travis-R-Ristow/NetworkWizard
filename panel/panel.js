@@ -4,6 +4,8 @@ class NetworkWizardPanel {
     this.calls = new Map();
     this.pendingRequests = new Map();
     this.overrides = new Map();
+    this.blockedCalls = new Set();
+    this.blockedListSnapshot = new Set();
     this.expandedCall = null;
     this.expandedTables = new Set();
     this.activeTab = 'headers';
@@ -14,6 +16,7 @@ class NetworkWizardPanel {
     this.tabId = chrome.devtools.inspectedWindow.tabId;
     this.debuggerAttached = false;
     this.drawerExpanded = false;
+    this.currentView = 'network';
     this.elements = {
       clearBtn: document.getElementById('clearBtn'),
       recordToggle: document.getElementById('recordToggle'),
@@ -25,13 +28,54 @@ class NetworkWizardPanel {
       eventList: document.getElementById('eventList'),
       networkBody: document.getElementById('networkBody'),
       emptyState: document.getElementById('emptyState'),
-      methodFilter: document.getElementById('methodFilter')
+      methodFilter: document.getElementById('methodFilter'),
+      headerTabs: document.getElementById('headerTabs'),
+      networkView: document.getElementById('networkView'),
+      blockedView: document.getElementById('blockedView'),
+      blockedList: document.getElementById('blockedList'),
+      blockedEmptyState: document.getElementById('blockedEmptyState'),
+      overridesView: document.getElementById('overridesView'),
+      overridesList: document.getElementById('overridesList'),
+      overridesEmptyState: document.getElementById('overridesEmptyState')
     };
     this.bindEvents();
     this.renderMethodFilter();
     this.connectToBackground();
     this.startCapture();
+    this.loadBlockedCalls();
     this.addEvent('info', 'NetworkWizard initialized');
+  }
+
+  loadBlockedCalls() {
+    chrome.devtools.inspectedWindow.eval('window.location.origin', (origin) => {
+      this.currentOrigin = origin;
+      chrome.storage.local.get(['blockedCalls'], (result) => {
+        const allBlocked = result.blockedCalls || {};
+        const blocked = allBlocked[origin] || [];
+        if (blocked.length > 0) {
+          this.attachDebugger().then(() => {
+            blocked.forEach(key => this.blockedCalls.add(key));
+            this.renderCalls();
+            this.addEvent('info', `Restored ${blocked.length} blocked call(s)`);
+          });
+        }
+      });
+    });
+  }
+
+  saveBlockedCalls() {
+    if (!this.currentOrigin) {
+      return;
+    }
+    chrome.storage.local.get(['blockedCalls'], (result) => {
+      const allBlocked = result.blockedCalls || {};
+      if (this.blockedCalls.size > 0) {
+        allBlocked[this.currentOrigin] = Array.from(this.blockedCalls);
+      } else {
+        delete allBlocked[this.currentOrigin];
+      }
+      chrome.storage.local.set({ blockedCalls: allBlocked });
+    });
   }
 
   connectToBackground() {
@@ -137,6 +181,8 @@ class NetworkWizardPanel {
     this.elements.networkBody.addEventListener('click', (e) => this.handleTableClick(e));
     this.elements.searchInput.addEventListener('input', (e) => this.updateFilter('search', e.target.value));
     this.elements.filterBar.addEventListener('click', (e) => this.handleFilterClick(e));
+    this.elements.headerTabs.addEventListener('click', (e) => this.handleHeaderTabClick(e));
+    this.elements.blockedList.addEventListener('click', (e) => this.handleBlockedListClick(e));
     document.addEventListener('click', (e) => {
       if (!e.target.closest('.kebab-menu')) {
         document.querySelectorAll('.kebab-menu.open').forEach(m => m.classList.remove('open'));
@@ -145,6 +191,98 @@ class NetworkWizardPanel {
         document.querySelectorAll('.chip-add-menu.open').forEach(m => m.classList.remove('open'));
       }
     });
+  }
+
+  handleHeaderTabClick(e) {
+    const tab = e.target.closest('.header-tab');
+    if (!tab) {
+      return;
+    }
+    this.switchView(tab.dataset.view);
+  }
+
+  switchView(view) {
+    this.currentView = view;
+
+    this.elements.headerTabs.querySelectorAll('.header-tab').forEach(t => {
+      t.classList.toggle('active', t.dataset.view === view);
+    });
+
+    this.elements.networkView.classList.toggle('hidden', view !== 'network');
+    this.elements.blockedView.classList.toggle('hidden', view !== 'blocked');
+    this.elements.overridesView.classList.toggle('hidden', view !== 'overrides');
+
+    if (view === 'blocked') {
+      this.blockedListSnapshot = new Set(this.blockedCalls);
+      this.renderBlockedList();
+    } else if (view === 'overrides') {
+      this.renderOverridesList();
+    }
+  }
+
+  renderBlockedList() {
+    const snapshot = this.blockedListSnapshot || new Set();
+
+    if (snapshot.size === 0) {
+      this.elements.blockedList.innerHTML = '';
+      this.elements.blockedEmptyState.style.display = 'flex';
+      return;
+    }
+
+    this.elements.blockedEmptyState.style.display = 'none';
+    this.elements.blockedList.innerHTML = `
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Call Name</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${Array.from(snapshot).map(key => {
+            const isGql = key.startsWith('gql:');
+            const name = key.replace(/^(gql:|rest:)/, '');
+            const badgeClass = isGql ? 'badge-gql' : 'badge-rest';
+            const isCurrentlyBlocked = this.blockedCalls.has(key);
+            const btnClass = isCurrentlyBlocked ? 'btn btn-sm btn-unblock' : 'btn btn-sm btn-danger';
+            const btnText = isCurrentlyBlocked ? 'Un-Block' : 'Block';
+            const action = isCurrentlyBlocked ? 'unblock' : 'block';
+            return `
+              <tr>
+                <td><span class="badge ${badgeClass}">${isGql ? 'GQL' : 'REST'}</span></td>
+                <td class="call-name" title="${this.escapeHtml(name)}">${this.escapeHtml(this.truncateCallName(name))}</td>
+                <td>
+                  <button class="${btnClass}" data-action="${action}" data-key="${this.escapeHtml(key)}">${btnText}</button>
+                </td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+  }
+
+  handleBlockedListClick(e) {
+    const btn = e.target.closest('.btn[data-action]');
+    if (btn && (btn.dataset.action === 'unblock' || btn.dataset.action === 'block')) {
+      this.toggleBlock(btn.dataset.key).then(() => {
+        this.renderBlockedList();
+      });
+    }
+  }
+
+  renderOverridesList() {
+    const overrides = Array.from(this.overrides.entries());
+
+    if (overrides.length === 0) {
+      this.elements.overridesList.innerHTML = '';
+      this.elements.overridesEmptyState.style.display = 'flex';
+      return;
+    }
+
+    this.elements.overridesEmptyState.style.display = 'none';
+    this.elements.overridesList.innerHTML = '<p class="text-muted">Override management coming soon...</p>';
   }
 
   handleFilterClick(e) {
@@ -409,7 +547,23 @@ class NetworkWizardPanel {
       return;
     }
 
+    const actionBtn = e.target.closest('.btn[data-action]');
+    if (actionBtn) {
+      e.stopPropagation();
+      const action = actionBtn.dataset.action;
+      const callKey = actionBtn.dataset.key;
+      if (action === 'block' || action === 'unblock') {
+        this.toggleBlock(callKey);
+      }
+      return;
+    }
+
     if (e.target.closest('.btn')) {
+      return;
+    }
+
+    const selection = window.getSelection();
+    if (selection && selection.toString().length > 0) {
       return;
     }
 
@@ -576,7 +730,7 @@ class NetworkWizardPanel {
         this.addEvent('success', 'Debugger attached for interception');
 
         chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.enable', {
-          patterns: [{ requestStage: 'Response' }]
+          patterns: [{ requestStage: 'Request' }]
         }, () => {
           if (chrome.runtime.lastError) {
             this.addEvent('error', 'Fetch enable failed');
@@ -586,9 +740,17 @@ class NetworkWizardPanel {
           resolve();
         });
 
+        chrome.debugger.onEvent.addListener((source, method, params) => {
+          if (source.tabId !== this.tabId || method !== 'Fetch.requestPaused') {
+            return;
+          }
+          this.handlePausedRequest(params);
+        });
+
         chrome.debugger.onDetach.addListener((source, reason) => {
           if (source.tabId === this.tabId) {
             this.debuggerAttached = false;
+            this.blockedCalls.clear();
             this.overrides.clear();
             this.addEvent('warning', 'Debugger detached: ' + reason);
             this.renderCalls();
@@ -596,6 +758,60 @@ class NetworkWizardPanel {
         });
       });
     });
+  }
+
+  handlePausedRequest(params) {
+    const { requestId, request } = params;
+    const url = this.stripQueryParams(request.url);
+    const isGql = url.includes('/graphql');
+
+    let shouldBlock = false;
+
+    if (isGql && request.postData) {
+      const operation = this.extractGqlOperation(request.postData);
+      if (operation && this.blockedCalls.has(`gql:${operation}`)) {
+        shouldBlock = true;
+      }
+    } else {
+      if (this.blockedCalls.has(`rest:${url}`)) {
+        shouldBlock = true;
+      }
+    }
+
+    if (shouldBlock) {
+      chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.failRequest', {
+        requestId,
+        errorReason: 'BlockedByClient'
+      }, () => {
+        if (chrome.runtime.lastError) {}
+      });
+    } else {
+      chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.continueRequest', {
+        requestId
+      }, () => {
+        if (chrome.runtime.lastError) {}
+      });
+    }
+  }
+
+  toggleBlock(callKey) {
+    if (this.blockedCalls.has(callKey)) {
+      this.blockedCalls.delete(callKey);
+      this.addEvent('info', `Un-Blocked: ${callKey}`);
+      this.saveBlockedCalls();
+      if (this.blockedCalls.size === 0 && this.overrides.size === 0) {
+        this.detachDebugger();
+      }
+      this.renderCalls();
+      return Promise.resolve();
+    } else {
+      return this.attachDebugger().then(() => {
+        this.blockedCalls.add(callKey);
+        this.addEvent('success', `Blocking: ${callKey}`);
+        this.saveBlockedCalls();
+        this.renderCalls();
+      });
+    }
   }
 
   detachDebugger() {
@@ -609,6 +825,13 @@ class NetworkWizardPanel {
   stripQueryParams(url) {
     const idx = url.indexOf('?');
     return idx === -1 ? url : url.substring(0, idx);
+  }
+
+  truncateCallName(name) {
+    if (name.length <= 150) {
+      return name;
+    }
+    return name.slice(0, 150) + '...';
   }
 
   extractGqlOperation(postData) {
@@ -643,19 +866,23 @@ class NetworkWizardPanel {
     filtered.forEach(([key, call]) => {
       const isExpanded = this.expandedCall === key;
       const isPending = call.pending;
+      const isBlocked = this.blockedCalls.has(key);
       const badgeClass = call.type === 'GQL' ? 'badge-gql' : 'badge-rest';
       const statusClass = isPending ? 'text-muted' : (call.hasError ? 'text-error' : 'text-success');
-      const rowClass = `call-row${isExpanded ? ' expanded' : ''}${isPending ? ' pending' : ''}`;
+      const rowClass = `call-row${isExpanded ? ' expanded' : ''}${isPending ? ' pending' : ''}${isBlocked ? ' blocked' : ''}`;
+      const blockBtnClass = isBlocked ? 'btn btn-sm btn-unblock' : 'btn btn-sm btn-danger';
+      const blockBtnText = isBlocked ? 'Un-Block' : 'Block';
+      const blockAction = isBlocked ? 'unblock' : 'block';
 
       rows.push(`
         <tr class="${rowClass}" data-call-key="${this.escapeHtml(key)}">
           <td><span class="expand-icon">${isPending ? '<span class="spinner"></span>' : '▶'}</span> <span class="badge ${badgeClass}">${call.type}</span></td>
           <td class="method-cell">${call.method}</td>
-          <td class="call-name">${this.escapeHtml(call.callName)}</td>
+          <td class="call-name" title="${this.escapeHtml(call.callName)}">${this.escapeHtml(this.truncateCallName(call.callName))}</td>
           <td><span class="font-semibold ${statusClass}">${isPending ? 'Loading...' : call.status}</span></td>
           <td class="actions-cell">
             <button class="btn btn-sm btn-primary" data-action="override" data-key="${this.escapeHtml(key)}"${isPending ? ' disabled' : ''}>Override</button>
-            <button class="btn btn-sm btn-danger" data-action="block" data-key="${this.escapeHtml(key)}"${isPending ? ' disabled' : ''}>Block</button>
+            <button class="${blockBtnClass}" data-action="${blockAction}" data-key="${this.escapeHtml(key)}"${isPending ? ' disabled' : ''}>${blockBtnText}</button>
             <div class="kebab-menu">
               <button class="kebab-btn" data-key="${this.escapeHtml(key)}"${isPending ? ' disabled' : ''}>⋮</button>
               <div class="kebab-dropdown">

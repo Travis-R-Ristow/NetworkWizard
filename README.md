@@ -12,11 +12,11 @@ A Chrome DevTools extension for monitoring, analyzing, and debugging network req
 - 📎 **Copy Support** - Copy request/response bodies or generate cURL commands
 - ⚡ **Real-time Updates** - Live capture with recording toggle
 - 🔮 **GraphQL Error Detection** - Identifies GQL errors even on 200 responses
+- 🚫 **Request Blocking** - Block specific REST URLs or GraphQL operations (persisted per origin)
 
 ### 🚧 Coming Soon
 
 - 🎭 **Response Override** - Mock responses for testing
-- 🚫 **Request Blocking** - Block specific requests
 - 🐢 **Response Delay** - Simulate slow network conditions
 - 💾 **Export/Import** - Save and load captured requests
 
@@ -48,13 +48,19 @@ Click any row to expand and view:
 ### Actions
 
 - **Override** - Override response (coming soon)
-- **Block** - Block request (coming soon)
+- **Block** - Block requests from being sent
 - **Copy cURL** - Generate and copy cURL command from kebab menu
 
 ### Controls
 
 - **Clear** - Remove all captured requests
 - **Recording** - Toggle request capture on/off
+
+### Managing Blocked Calls
+
+- Use the **Blocked** tab to view and manage all blocked calls
+- Toggle blocking on/off without removing from the list
+- Blocked calls persist per origin and restore on reload
 
 ## 📁 Project Structure
 
@@ -74,5 +80,6 @@ NetworkWizard/
 ## 🔐 Permissions
 
 - `webRequest` - Capture pending requests as they start
-- `debugger` - Required for future override/block functionality
+- `debugger` - Required for blocking requests and future override functionality
+- `storage` - Persist blocked calls across sessions
 - `<all_urls>` - Required to capture requests from any domain

@@ -6,7 +6,14 @@
 </head>
 <body>
   <header class="panel-header">
-    <h1 class="text-xl font-medium">NetworkWizard</h1>
+    <div class="header-left">
+      <h1 class="text-xl font-medium">NetworkWizard</h1>
+      <nav class="header-tabs" id="headerTabs">
+        <button class="header-tab active" data-view="network">Network</button>
+        <button class="header-tab" data-view="blocked">Blocked</button>
+        <button class="header-tab" data-view="overrides">Overrides</button>
+      </nav>
+    </div>
     <nav class="flex items-center gap-md">
       <button id="clearBtn" class="btn btn-secondary">Clear</button>
       <label class="toggle">
@@ -15,38 +22,66 @@
       </label>
     </nav>
   </header>
-  <nav class="filter-bar">
-    <input type="text" id="searchInput" class="search-input" placeholder="Search calls...">
-    <div class="filter-group">
-      <button class="filter-btn active" data-filter="type" data-value="all">All</button>
-      <button class="filter-btn" data-filter="type" data-value="REST">REST</button>
-      <button class="filter-btn" data-filter="type" data-value="GQL">GQL</button>
-    </div>
-    <div class="filter-chips" id="methodFilter"></div>
-    <div class="filter-group">
-      <button class="filter-btn active" data-filter="status" data-value="all">Any Status</button>
-      <button class="filter-btn" data-filter="status" data-value="success">Success</button>
-      <button class="filter-btn" data-filter="status" data-value="error">Error</button>
-    </div>
-  </nav>
-  <main>
-    <table class="table" id="networkTable">
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Method</th>
-          <th>Call Name</th>
-          <th>Status</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody id="networkBody"></tbody>
-    </table>
-    <section class="empty-state" id="emptyState">
-      <p class="text-lg">No network calls captured yet.</p>
-      <p class="text-muted">Make requests on the page to see them here.</p>
-    </section>
-  </main>
+  <div class="view-container" id="networkView">
+    <nav class="filter-bar">
+      <input type="text" id="searchInput" class="search-input" placeholder="Search calls...">
+      <div class="filter-group">
+        <button class="filter-btn active" data-filter="type" data-value="all">All</button>
+        <button class="filter-btn" data-filter="type" data-value="REST">REST</button>
+        <button class="filter-btn" data-filter="type" data-value="GQL">GQL</button>
+      </div>
+      <div class="filter-chips" id="methodFilter"></div>
+      <div class="filter-group">
+        <button class="filter-btn active" data-filter="status" data-value="all">Any Status</button>
+        <button class="filter-btn" data-filter="status" data-value="success">Success</button>
+        <button class="filter-btn" data-filter="status" data-value="error">Error</button>
+      </div>
+    </nav>
+    <main>
+      <table class="table" id="networkTable">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Method</th>
+            <th>Call Name</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="networkBody"></tbody>
+      </table>
+      <section class="empty-state" id="emptyState">
+        <p class="text-lg">No network calls captured yet.</p>
+        <p class="text-muted">Make requests on the page to see them here.</p>
+      </section>
+    </main>
+  </div>
+  <div class="view-container hidden" id="blockedView">
+    <main class="view-content">
+      <div class="view-header">
+        <h2 class="text-lg font-medium">Blocked Calls</h2>
+        <p class="text-muted">Manage calls that are being blocked</p>
+      </div>
+      <div id="blockedList"></div>
+      <section class="empty-state" id="blockedEmptyState">
+        <p class="text-lg">No blocked calls</p>
+        <p class="text-muted">Block calls from the Network tab to see them here.</p>
+      </section>
+    </main>
+  </div>
+  <div class="view-container hidden" id="overridesView">
+    <main class="view-content">
+      <div class="view-header">
+        <h2 class="text-lg font-medium">Response Overrides</h2>
+        <p class="text-muted">Manage response overrides</p>
+      </div>
+      <div id="overridesList"></div>
+      <section class="empty-state" id="overridesEmptyState">
+        <p class="text-lg">No overrides configured</p>
+        <p class="text-muted">Override responses from the Network tab to see them here.</p>
+      </section>
+    </main>
+  </div>
   <aside class="status-drawer collapsed" id="statusDrawer">
     <header class="status-drawer-header" id="statusDrawerToggle">
       <span id="statusText">Ready</span>
