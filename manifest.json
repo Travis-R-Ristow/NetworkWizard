@@ -2,14 +2,13 @@
   "manifest_version": 3,
   "name": "NetworkWizard",
   "version": "1.0.0",
-  "description": "DevTools extension to interpret and override network calls",
+  "description": "DevTools extension to review and override network calls",
   "devtools_page": "devtools.html",
-  "permissions": [
-    "debugger"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["debugger", "webRequest"],
+  "host_permissions": ["<all_urls>"],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

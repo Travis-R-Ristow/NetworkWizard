@@ -61,6 +61,7 @@ Click any row to expand and view:
 ```
 NetworkWizard/
 ├── manifest.json      # Extension configuration
+├── background.js      # Service worker for pending requests
 ├── devtools.html      # DevTools entry point
 ├── devtools.js        # Panel creation
 ├── panel/
@@ -72,5 +73,6 @@ NetworkWizard/
 
 ## 🔐 Permissions
 
+- `webRequest` - Capture pending requests as they start
 - `debugger` - Required for future override/block functionality
 - `<all_urls>` - Required to capture requests from any domain

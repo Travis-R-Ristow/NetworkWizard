@@ -2,6 +2,7 @@ class NetworkWizardPanel {
   constructor() {
     this.isRecording = true;
     this.calls = new Map();
+    this.pendingRequests = new Map();
     this.overrides = new Map();
     this.expandedCall = null;
     this.expandedTables = new Set();
@@ -28,8 +29,105 @@ class NetworkWizardPanel {
     };
     this.bindEvents();
     this.renderMethodFilter();
+    this.connectToBackground();
     this.startCapture();
     this.addEvent('info', 'NetworkWizard initialized');
+  }
+
+  connectToBackground() {
+    try {
+      this.port = chrome.runtime.connect({ name: 'networkwizard' });
+      this.port.postMessage({ type: 'init', tabId: this.tabId });
+
+      this.port.onMessage.addListener((msg) => {
+        if (!this.isRecording) {
+          return;
+        }
+
+        if (msg.type === 'requestStart') {
+          this.addPendingRequest(msg);
+        } else if (msg.type === 'requestEnd') {
+          this.completePendingRequest(msg.requestId, msg.statusCode);
+        } else if (msg.type === 'requestError') {
+          this.failPendingRequest(msg.requestId);
+        }
+      });
+
+      this.port.onDisconnect.addListener(() => {
+        this.addEvent('warning', 'Background connection lost');
+      });
+    } catch (e) {
+      this.addEvent('error', 'Failed to connect to background');
+    }
+  }
+
+  addPendingRequest(msg) {
+    const url = this.stripQueryParams(msg.url);
+    const isGql = url.includes('/graphql');
+    const gqlOperation = isGql ? this.extractGqlOperation(msg.bodyText) : null;
+    const callName = gqlOperation || url;
+    const callKey = gqlOperation ? `gql:${gqlOperation}` : `rest:${url}`;
+
+    if (this.calls.has(callKey) && !this.calls.get(callKey).pending) {
+      return;
+    }
+
+    const method = msg.method;
+    if (!this.knownMethods.has(method)) {
+      this.knownMethods.add(method);
+      this.renderMethodFilter();
+    }
+
+    this.pendingRequests.set(msg.requestId, callKey);
+    this.calls.set(callKey, {
+      type: isGql ? 'GQL' : 'REST',
+      callName,
+      method,
+      fullUrl: msg.url,
+      status: null,
+      statusText: '',
+      hasError: false,
+      requestHeaders: {},
+      responseHeaders: {},
+      requestBody: msg.bodyText,
+      pending: true
+    });
+
+    this.renderCalls();
+  }
+
+  completePendingRequest(requestId, statusCode) {
+    const callKey = this.pendingRequests.get(requestId);
+    if (!callKey) {
+      return;
+    }
+
+    const call = this.calls.get(callKey);
+    if (call && call.pending) {
+      call.status = statusCode;
+      call.hasError = statusCode >= 400;
+      call.pending = false;
+      this.renderCalls();
+    }
+
+    this.pendingRequests.delete(requestId);
+  }
+
+  failPendingRequest(requestId) {
+    const callKey = this.pendingRequests.get(requestId);
+    if (!callKey) {
+      return;
+    }
+
+    const call = this.calls.get(callKey);
+    if (call && call.pending) {
+      call.status = 'Failed';
+      call.hasError = true;
+      call.pending = false;
+    }
+
+    this.pendingRequests.delete(requestId);
+    this.renderCalls();
   }
 
   bindEvents() {
@@ -191,6 +289,7 @@ class NetworkWizardPanel {
 
     chrome.devtools.network.onNavigated.addListener(() => {
       this.calls.clear();
+      this.pendingRequests.clear();
       this.expandedCall = null;
       this.renderCalls();
       this.addEvent('info', 'Page reloaded - cleared calls');
@@ -227,7 +326,8 @@ class NetworkWizardPanel {
       responseHeaders: this.headersToObject(response.headers),
       requestBody: request.postData?.text || null,
       mimeType: response.content?.mimeType,
-      entry
+      entry,
+      pending: false
     };
 
     if (isGql && response.status === 200) {
@@ -295,6 +395,9 @@ class NetworkWizardPanel {
     const kebabBtn = e.target.closest('.kebab-btn');
     if (kebabBtn) {
       e.stopPropagation();
+      if (kebabBtn.disabled) {
+        return;
+      }
       this.toggleKebabMenu(kebabBtn);
       return;
     }
@@ -311,7 +414,7 @@ class NetworkWizardPanel {
     }
 
     const row = e.target.closest('.call-row');
-    if (row) {
+    if (row && !row.classList.contains('pending')) {
       this.toggleCallExpansion(row.dataset.callKey);
     }
   }
@@ -414,6 +517,12 @@ class NetworkWizardPanel {
   fetchResponseBody(callKey) {
     const call = this.calls.get(callKey);
     if (!call || call.responseBody !== undefined) {
+      return;
+    }
+
+    if (!call.entry) {
+      call.responseBody = null;
+      this.renderCalls();
       return;
     }
 
@@ -533,20 +642,22 @@ class NetworkWizardPanel {
 
     filtered.forEach(([key, call]) => {
       const isExpanded = this.expandedCall === key;
+      const isPending = call.pending;
       const badgeClass = call.type === 'GQL' ? 'badge-gql' : 'badge-rest';
-      const statusClass = call.hasError ? 'text-error' : 'text-success';
+      const statusClass = isPending ? 'text-muted' : (call.hasError ? 'text-error' : 'text-success');
+      const rowClass = `call-row${isExpanded ? ' expanded' : ''}${isPending ? ' pending' : ''}`;
 
       rows.push(`
-        <tr class="call-row${isExpanded ? ' expanded' : ''}" data-call-key="${this.escapeHtml(key)}">
-          <td><span class="expand-icon">▶</span> <span class="badge ${badgeClass}">${call.type}</span></td>
+        <tr class="${rowClass}" data-call-key="${this.escapeHtml(key)}">
+          <td><span class="expand-icon">${isPending ? '<span class="spinner"></span>' : '▶'}</span> <span class="badge ${badgeClass}">${call.type}</span></td>
           <td class="method-cell">${call.method}</td>
           <td class="call-name">${this.escapeHtml(call.callName)}</td>
-          <td><span class="font-semibold ${statusClass}">${call.status}</span></td>
+          <td><span class="font-semibold ${statusClass}">${isPending ? 'Loading...' : call.status}</span></td>
           <td class="actions-cell">
-            <button class="btn btn-sm btn-primary" data-action="override" data-key="${this.escapeHtml(key)}">Override</button>
-            <button class="btn btn-sm btn-danger" data-action="block" data-key="${this.escapeHtml(key)}">Block</button>
+            <button class="btn btn-sm btn-primary" data-action="override" data-key="${this.escapeHtml(key)}"${isPending ? ' disabled' : ''}>Override</button>
+            <button class="btn btn-sm btn-danger" data-action="block" data-key="${this.escapeHtml(key)}"${isPending ? ' disabled' : ''}>Block</button>
             <div class="kebab-menu">
-              <button class="kebab-btn" data-key="${this.escapeHtml(key)}">⋮</button>
+              <button class="kebab-btn" data-key="${this.escapeHtml(key)}"${isPending ? ' disabled' : ''}>⋮</button>
               <div class="kebab-dropdown">
                 <button class="kebab-option" data-action="copy-curl" data-key="${this.escapeHtml(key)}">Copy cURL</button>
               </div>
@@ -555,7 +666,7 @@ class NetworkWizardPanel {
         </tr>
       `);
 
-      if (isExpanded) {
+      if (isExpanded && !isPending) {
         rows.push(`<tr class="call-details visible"><td colspan="5">${this.renderCallDetails(call, key)}</td></tr>`);
       }
     });
@@ -567,9 +678,14 @@ class NetworkWizardPanel {
     const requestHeaders = this.renderHeaders(call.requestHeaders, `${callKey}-req`);
     const responseHeaders = this.renderHeaders(call.responseHeaders, `${callKey}-res`);
     const requestBody = this.formatBody(call.requestBody);
-    const responseBody = call.responseBody === undefined
-      ? '<span class="text-muted">Loading...</span>'
-      : this.formatBody(call.responseBody);
+    let responseBody;
+    if (call.responseBody === undefined) {
+      responseBody = '<span class="text-muted">Loading...</span>';
+    } else if (call.responseBody === null && !call.entry) {
+      responseBody = '<span class="text-muted">Response not captured (request started before DevTools)</span>';
+    } else {
+      responseBody = this.formatBody(call.responseBody);
+    }
 
     const statusClass = call.hasError ? 'text-error' : 'text-success';
 

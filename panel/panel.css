@@ -372,6 +372,15 @@ body {
   color: #fff;
 }
 
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn:disabled:hover {
+  background: transparent;
+}
+
 .toggle {
   display: flex;
   align-items: center;
@@ -419,6 +428,28 @@ body {
 
 .table tbody tr.call-row.expanded {
   background: var(--color-bg-hover);
+}
+
+.table tbody tr.call-row.pending {
+  opacity: 0.7;
+}
+
+.table tbody tr.call-row.pending .call-name {
+  color: var(--color-text-muted);
+}
+
+.spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .call-row td:first-child {
@@ -679,6 +710,16 @@ body {
 .kebab-btn:hover {
   background: var(--color-bg-hover);
   color: var(--color-text);
+}
+
+.kebab-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.kebab-btn:disabled:hover {
+  background: transparent;
+  color: var(--color-text-muted);
 }
 
 .kebab-dropdown {
