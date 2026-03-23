@@ -8,6 +8,7 @@ class NetworkWizardPanel {
     this.blockedCalls = new Map();
     this.blockedListSnapshot = new Map();
     this.scopeFilter = 'all';
+    this.jsonEditors = new Map();
     this.expandedCall = null;
     this.expandedOverride = null;
     this.expandedDelay = null;
@@ -80,7 +81,7 @@ class NetworkWizardPanel {
             });
             this.renderCalls();
             this.addEvent('info', `Restored ${allEntries.length} blocked call(s)`);
-          });
+          }).catch(() => {});
         }
       });
     });
@@ -134,7 +135,7 @@ class NetworkWizardPanel {
             allEntries.forEach(o => this.overrides.set(o.key, o));
             this.renderOverridesList();
             this.addEvent('info', `Restored ${allEntries.length} override(s)`);
-          });
+          }).catch(() => {});
         }
       });
     });
@@ -188,7 +189,7 @@ class NetworkWizardPanel {
             allEntries.forEach(d => this.delays.set(d.key, d));
             this.renderDelaysList();
             this.addEvent('info', `Restored ${allEntries.length} delay(s)`);
-          });
+          }).catch(() => {});
         }
       });
     });
@@ -651,8 +652,54 @@ class NetworkWizardPanel {
       this.autoSizeTextarea(textarea);
     });
 
+    this.initJsonEditors();
+
     document.documentElement.scrollTop = document.body.scrollTop = pageScrollTop;
     this.elements.overridesView.scrollTop = viewScrollTop;
+  }
+
+  initJsonEditors() {
+    const activeKeys = new Set();
+
+    this.elements.overridesList.querySelectorAll('.json-editor-container[data-field="responseBody"]').forEach(container => {
+      const key = container.dataset.key;
+      const override = this.overrides.get(key);
+      activeKeys.add(key);
+
+      if (!override) {
+        return;
+      }
+
+      const existingEditor = this.jsonEditors.get(key);
+      if (existingEditor) {
+        if (existingEditor.container.isConnected) {
+          return;
+        }
+        existingEditor.destroy();
+        this.jsonEditors.delete(key);
+      }
+
+      const editor = new JsonEditor(container, {
+        placeholder: 'Enter response body JSON...',
+        onChange: (newValue) => {
+          const o = this.overrides.get(key);
+          if (o) {
+            o.responseBody = newValue || null;
+            this.saveOverrides();
+          }
+        }
+      });
+
+      editor.setValue(override.responseBody || '');
+      this.jsonEditors.set(key, editor);
+    });
+
+    this.jsonEditors.forEach((editor, key) => {
+      if (!activeKeys.has(key)) {
+        editor.destroy();
+        this.jsonEditors.delete(key);
+      }
+    });
   }
 
   autoSizeTextarea(textarea) {
@@ -730,7 +777,7 @@ class NetworkWizardPanel {
               <button class="btn btn-sm btn-secondary" data-action="import-body" data-key="${key}">Import JSON</button>
             </div>
           </div>
-          <textarea class="override-textarea auto-size" data-field="responseBody" data-key="${key}" placeholder="Enter response body JSON...">${this.escapeHtml(override.responseBody || '')}</textarea>
+          <div class="json-editor-container" data-field="responseBody" data-key="${key}"></div>
         </div>
 
         <div class="override-section">
@@ -955,10 +1002,7 @@ class NetworkWizardPanel {
       return;
     }
 
-    if (target.dataset.field === 'responseBody') {
-      override.responseBody = target.value || null;
-      this.saveOverrides();
-    } else if (target.dataset.field === 'responseHeaders-json') {
+    if (target.dataset.field === 'responseHeaders-json') {
       try {
         const parsed = target.value ? JSON.parse(target.value) : null;
         if (parsed) {
@@ -1170,12 +1214,18 @@ class NetworkWizardPanel {
       const reader = new FileReader();
       reader.onload = (ev) => {
         try {
-          JSON.parse(ev.target.result);
+          const parsed = JSON.parse(ev.target.result);
+          const formatted = JSON.stringify(parsed, null, 2);
           const override = this.overrides.get(key);
           if (override) {
-            override.responseBody = ev.target.result;
+            override.responseBody = formatted;
             this.saveOverrides();
-            this.renderOverridesList();
+
+            const editor = this.jsonEditors.get(key);
+            if (editor && editor.container.isConnected) {
+              editor.setValue(formatted);
+            }
+
             this.addEvent('success', 'Imported response body');
           }
         } catch (err) {
@@ -1231,7 +1281,7 @@ class NetworkWizardPanel {
               this.saveOverrides();
               this.renderOverridesList();
               this.addEvent('success', `Imported ${imported} override(s)`);
-            });
+            }).catch(() => {});
           } else {
             this.addEvent('error', 'No valid overrides found in file');
           }
@@ -1716,8 +1766,9 @@ class NetworkWizardPanel {
     return new Promise((resolve, reject) => {
       chrome.debugger.attach({ tabId: this.tabId }, '1.3', () => {
         if (chrome.runtime.lastError) {
-          this.addEvent('error', 'Debugger attach failed: ' + chrome.runtime.lastError.message);
-          reject(chrome.runtime.lastError);
+          const msg = chrome.runtime.lastError.message || 'Unknown error';
+          this.addEvent('error', 'Debugger attach failed: ' + msg);
+          reject(new Error(msg));
           return;
         }
 
@@ -1728,8 +1779,9 @@ class NetworkWizardPanel {
           patterns: [{ requestStage: 'Request' }, { requestStage: 'Response' }]
         }, () => {
           if (chrome.runtime.lastError) {
-            this.addEvent('error', 'Fetch enable failed');
-            reject(chrome.runtime.lastError);
+            const msg = chrome.runtime.lastError.message || 'Unknown error';
+            this.addEvent('error', 'Fetch enable failed: ' + msg);
+            reject(new Error(msg));
             return;
           }
           resolve();
@@ -1992,7 +2044,7 @@ class NetworkWizardPanel {
         this.addEvent('success', `Blocking: ${callKey}`);
         this.saveBlockedCalls();
         this.renderCalls();
-      });
+      }).catch(() => {});
     }
   }
 
@@ -2062,7 +2114,7 @@ class NetworkWizardPanel {
       this.attachDebugger().then(() => {
         this.saveOverrides();
         this.addEvent('success', `Created override for: ${call.callName}`);
-      });
+      }).catch(() => {});
     }
 
     this.expandedOverride = callKey;
@@ -2165,7 +2217,7 @@ class NetworkWizardPanel {
       this.attachDebugger().then(() => {
         this.saveDelays();
         this.addEvent('success', `Created delay for: ${call.callName}`);
-      });
+      }).catch(() => {});
     }
 
     this.expandedDelay = callKey;
@@ -2535,20 +2587,74 @@ class NetworkWizardPanel {
     });
 
     networkBody.innerHTML = rows.join('');
+    this.initNetworkJsonEditors();
+  }
+
+  initNetworkJsonEditors() {
+    const activeKeys = new Set();
+
+    this.elements.networkBody.querySelectorAll('.json-editor-container[data-callkey]').forEach(container => {
+      const callKey = container.dataset.callkey;
+      const field = container.dataset.field;
+      const editorKey = `${callKey}-${field}`;
+      const call = this.calls.get(callKey);
+      activeKeys.add(editorKey);
+
+      if (!call) {
+        return;
+      }
+
+      let value = '';
+      let placeholder = '';
+
+      if (field === 'requestBody') {
+        value = call.requestBody || '';
+        placeholder = 'No request body';
+      } else if (field === 'responseBodyView') {
+        if (call.responseBody === undefined) {
+          placeholder = 'Loading response...';
+        } else if (call.responseBody === null && !call.entry) {
+          placeholder = 'Response not captured (request started before DevTools)';
+        } else {
+          value = call.responseBody || '';
+          placeholder = 'No response body';
+        }
+      }
+
+      const existingEditor = this.jsonEditors.get(editorKey);
+      if (existingEditor) {
+        if (existingEditor.container.isConnected) {
+          if (existingEditor.getValue() !== value && value) {
+            existingEditor.setValue(value);
+          }
+          return;
+        }
+        existingEditor.destroy();
+        this.jsonEditors.delete(editorKey);
+      }
+
+      const editor = new JsonEditor(container, {
+        placeholder: placeholder,
+        readOnly: true
+      });
+
+      editor.setValue(value);
+      this.jsonEditors.set(editorKey, editor);
+    });
+
+    this.jsonEditors.forEach((editor, key) => {
+      if (key.includes('-requestBody') || key.includes('-responseBodyView')) {
+        if (!activeKeys.has(key)) {
+          editor.destroy();
+          this.jsonEditors.delete(key);
+        }
+      }
+    });
   }
 
   renderCallDetails(call, callKey) {
     const requestHeaders = this.renderHeaders(call.requestHeaders, `${callKey}-req`);
     const responseHeaders = this.renderHeaders(call.responseHeaders, `${callKey}-res`);
-    const requestBody = this.formatBody(call.requestBody);
-    let responseBody;
-    if (call.responseBody === undefined) {
-      responseBody = '<span class="text-muted">Loading...</span>';
-    } else if (call.responseBody === null && !call.entry) {
-      responseBody = '<span class="text-muted">Response not captured (request started before DevTools)</span>';
-    } else {
-      responseBody = this.formatBody(call.responseBody);
-    }
 
     const statusClass = call.hasError ? 'text-error' : 'text-success';
 
@@ -2586,13 +2692,13 @@ class NetworkWizardPanel {
           <div class="panel-toolbar">
             <button class="btn btn-sm btn-secondary copy-btn" data-copy="request" data-key="${callKey}">Copy</button>
           </div>
-          <pre class="details-code">${requestBody}</pre>
+          <div class="json-editor-container" data-field="requestBody" data-callkey="${callKey}" data-readonly="true"></div>
         </section>
         <section class="details-panel${this.activeTab === 'response' ? ' active' : ''}" data-panel="response">
           <div class="panel-toolbar">
             <button class="btn btn-sm btn-secondary copy-btn" data-copy="response" data-key="${callKey}">Copy</button>
           </div>
-          <pre class="details-code">${responseBody}</pre>
+          <div class="json-editor-container" data-field="responseBodyView" data-callkey="${callKey}" data-readonly="true"></div>
         </section>
       </div>
     `;

@@ -1577,3 +1577,25 @@ body {
   color: var(--color-text-muted);
   font-style: italic;
 }
+
+.json-editor-container {
+  min-height: 200px;
+}
+
+.json-editor-container .json-editor {
+  height: 100%;
+}
+
+.json-editor-container .json-editor-content {
+  min-height: 150px;
+  max-height: 45vh;
+}
+
+.details-panel .json-editor-container {
+  min-height: 150px;
+}
+
+.details-panel .json-editor-container .json-editor-content {
+  min-height: 120px;
+  max-height: 40vh;
+}
