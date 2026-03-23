@@ -67,6 +67,7 @@ class JsonEditor {
 
     if (this.options.readOnly) {
       this.elements.textView.readOnly = true;
+      this.container.setAttribute('data-readonly', 'true');
     }
   }
 
@@ -88,8 +89,10 @@ class JsonEditor {
       }
     });
 
-    this.elements.treeView.addEventListener('click', () => {
-      this.container.focus();
+    this.elements.treeView.addEventListener('click', (e) => {
+      if (!e.target.closest('.json-value') && !e.target.closest('.json-inline-edit')) {
+        this.container.focus();
+      }
     });
   }
 
@@ -124,7 +127,140 @@ class JsonEditor {
     if (toggle) {
       const path = toggle.dataset.path;
       this.toggleCollapse(path);
+      return;
     }
+
+    if (this.options.readOnly) {
+      return;
+    }
+
+    const valueEl = e.target.closest('.json-value');
+    if (valueEl && !valueEl.classList.contains('editing')) {
+      const node = valueEl.closest('.json-node');
+      if (node) {
+        this.startInlineEdit(node, valueEl);
+      }
+    }
+  }
+
+  startInlineEdit(node, valueEl) {
+    const path = node.dataset.path;
+    const currentValue = this.getValueAtPath(path);
+    const type = this.getType(currentValue);
+
+    if (type === 'object' || type === 'array') {
+      return;
+    }
+
+    valueEl.classList.add('editing');
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'json-inline-edit';
+
+    if (type === 'string') {
+      input.value = currentValue;
+    } else if (type === 'null') {
+      input.value = 'null';
+    } else {
+      input.value = String(currentValue);
+    }
+
+    input.dataset.originalType = type;
+    input.dataset.path = path;
+
+    const originalHtml = valueEl.innerHTML;
+    valueEl.innerHTML = '';
+    valueEl.appendChild(input);
+    input.focus();
+    input.select();
+
+    const finishEdit = (save) => {
+      if (!valueEl.contains(input)) {
+        return;
+      }
+
+      if (save) {
+        const newValue = this.parseInputValue(input.value, input.dataset.originalType);
+        this.setValueAtPath(path, newValue);
+        this.value = JSON.stringify(this.parsedJson, null, 2);
+        this.renderTree();
+
+        if (this.options.onChange) {
+          this.options.onChange(this.value);
+        }
+      } else {
+        valueEl.innerHTML = originalHtml;
+        valueEl.classList.remove('editing');
+      }
+    };
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        finishEdit(true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        finishEdit(false);
+      }
+    });
+
+    input.addEventListener('blur', () => {
+      finishEdit(true);
+    });
+  }
+
+  parseInputValue(inputValue, originalType) {
+    const trimmed = inputValue.trim();
+
+    if (trimmed === 'null') {
+      return null;
+    }
+    if (trimmed === 'true') {
+      return true;
+    }
+    if (trimmed === 'false') {
+      return false;
+    }
+
+    const num = Number(trimmed);
+    if (!isNaN(num) && trimmed !== '' && originalType === 'number') {
+      return num;
+    }
+
+    return inputValue;
+  }
+
+  getValueAtPath(path) {
+    const parts = this.parsePath(path);
+    let current = this.parsedJson;
+
+    for (const part of parts) {
+      if (current === null || current === undefined) {
+        return undefined;
+      }
+      current = current[part];
+    }
+
+    return current;
+  }
+
+  setValueAtPath(path, value) {
+    const parts = this.parsePath(path);
+    let current = this.parsedJson;
+
+    for (let i = 0; i < parts.length - 1; i++) {
+      current = current[parts[i]];
+    }
+
+    current[parts[parts.length - 1]] = value;
+  }
+
+  parsePath(path) {
+    if (path === '$') {
+      return [];
+    }
+    return path.slice(2).split(/\.|\[|\]/).filter(p => p !== '');
   }
 
   handleTextInput() {
@@ -568,6 +704,11 @@ class JsonEditor {
   setReadOnly(readOnly) {
     this.options.readOnly = readOnly;
     this.elements.textView.readOnly = readOnly;
+    if (readOnly) {
+      this.container.setAttribute('data-readonly', 'true');
+    } else {
+      this.container.removeAttribute('data-readonly');
+    }
   }
 
   focus() {

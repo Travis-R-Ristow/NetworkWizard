@@ -1579,7 +1579,7 @@ body {
 }
 
 .json-editor-container {
-  min-height: 200px;
+  min-height: 250px;
 }
 
 .json-editor-container .json-editor {
@@ -1587,8 +1587,8 @@ body {
 }
 
 .json-editor-container .json-editor-content {
-  min-height: 150px;
-  max-height: 45vh;
+  min-height: 200px;
+  max-height: 70vh;
 }
 
 .details-panel .json-editor-container {
@@ -1597,5 +1597,5 @@ body {
 
 .details-panel .json-editor-container .json-editor-content {
   min-height: 120px;
-  max-height: 40vh;
+  max-height: 50vh;
 }
