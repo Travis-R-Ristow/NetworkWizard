@@ -12,6 +12,7 @@
         <button class="header-tab active" data-view="network">Network</button>
         <button class="header-tab" data-view="blocked">Blocked</button>
         <button class="header-tab" data-view="overrides">Overrides</button>
+        <button class="header-tab" data-view="delays">Delays</button>
       </nav>
     </div>
     <nav class="flex items-center gap-md">
@@ -79,6 +80,19 @@
       <section class="empty-state" id="overridesEmptyState">
         <p class="text-lg">No overrides configured</p>
         <p class="text-muted">Override responses from the Network tab to see them here.</p>
+      </section>
+    </main>
+  </div>
+  <div class="view-container hidden" id="delaysView">
+    <main class="view-content">
+      <div class="view-header">
+        <h2 class="text-lg font-medium">Request Delays</h2>
+        <p class="text-muted">Add artificial delays to test loading states and timeouts</p>
+      </div>
+      <div id="delaysList"></div>
+      <section class="empty-state" id="delaysEmptyState">
+        <p class="text-lg">No delays configured</p>
+        <p class="text-muted">Add delays from the Network tab to see them here.</p>
       </section>
     </main>
   </div>

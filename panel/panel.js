@@ -4,10 +4,12 @@ class NetworkWizardPanel {
     this.calls = new Map();
     this.pendingRequests = new Map();
     this.overrides = new Map();
+    this.delays = new Map();
     this.blockedCalls = new Set();
     this.blockedListSnapshot = new Set();
     this.expandedCall = null;
     this.expandedOverride = null;
+    this.expandedDelay = null;
     this.expandedTables = new Set();
     this.activeTab = 'headers';
     this.overrideHeadersView = new Map();
@@ -38,7 +40,10 @@ class NetworkWizardPanel {
       blockedEmptyState: document.getElementById('blockedEmptyState'),
       overridesView: document.getElementById('overridesView'),
       overridesList: document.getElementById('overridesList'),
-      overridesEmptyState: document.getElementById('overridesEmptyState')
+      overridesEmptyState: document.getElementById('overridesEmptyState'),
+      delaysView: document.getElementById('delaysView'),
+      delaysList: document.getElementById('delaysList'),
+      delaysEmptyState: document.getElementById('delaysEmptyState')
     };
     this.bindEvents();
     this.renderMethodFilter();
@@ -46,6 +51,7 @@ class NetworkWizardPanel {
     this.startCapture();
     this.loadBlockedCalls();
     this.loadOverrides();
+    this.loadDelays();
     this.addEvent('info', 'NetworkWizard initialized');
   }
 
@@ -110,6 +116,38 @@ class NetworkWizardPanel {
         delete allOverrides[this.currentOrigin];
       }
       chrome.storage.local.set({ overrides: allOverrides });
+    });
+  }
+
+  loadDelays() {
+    chrome.devtools.inspectedWindow.eval('window.location.origin', (origin) => {
+      this.currentOrigin = origin;
+      chrome.storage.local.get(['delays'], (result) => {
+        const allDelays = result.delays || {};
+        const delays = allDelays[origin] || [];
+        if (delays.length > 0) {
+          this.attachDebugger().then(() => {
+            delays.forEach(d => this.delays.set(d.key, d));
+            this.renderDelaysList();
+            this.addEvent('info', `Restored ${delays.length} delay(s)`);
+          });
+        }
+      });
+    });
+  }
+
+  saveDelays() {
+    if (!this.currentOrigin) {
+      return;
+    }
+    chrome.storage.local.get(['delays'], (result) => {
+      const allDelays = result.delays || {};
+      if (this.delays.size > 0) {
+        allDelays[this.currentOrigin] = Array.from(this.delays.values());
+      } else {
+        delete allDelays[this.currentOrigin];
+      }
+      chrome.storage.local.set({ delays: allDelays });
     });
   }
 
@@ -221,6 +259,8 @@ class NetworkWizardPanel {
     this.elements.overridesList.addEventListener('click', (e) => this.handleOverridesListClick(e));
     this.elements.overridesList.addEventListener('input', (e) => this.handleOverridesListInput(e));
     this.elements.overridesList.addEventListener('change', (e) => this.handleOverridesListChange(e));
+    this.elements.delaysList.addEventListener('click', (e) => this.handleDelaysListClick(e));
+    this.elements.delaysList.addEventListener('input', (e) => this.handleDelaysListInput(e));
     document.addEventListener('click', (e) => {
       if (!e.target.closest('.kebab-menu')) {
         document.querySelectorAll('.kebab-menu.open').forEach(m => m.classList.remove('open'));
@@ -249,12 +289,15 @@ class NetworkWizardPanel {
     this.elements.networkView.classList.toggle('hidden', view !== 'network');
     this.elements.blockedView.classList.toggle('hidden', view !== 'blocked');
     this.elements.overridesView.classList.toggle('hidden', view !== 'overrides');
+    this.elements.delaysView.classList.toggle('hidden', view !== 'delays');
 
     if (view === 'blocked') {
       this.blockedListSnapshot = new Set(this.blockedCalls);
       this.renderBlockedList();
     } else if (view === 'overrides') {
       this.renderOverridesList();
+    } else if (view === 'delays') {
+      this.renderDelaysList();
     }
   }
 
@@ -1290,6 +1333,8 @@ class NetworkWizardPanel {
         this.toggleBlock(callKey);
       } else if (action === 'override') {
         this.createOrEditOverride(callKey);
+      } else if (action === 'delay') {
+        this.createOrEditDelay(callKey);
       }
       return;
     }
@@ -1466,7 +1511,7 @@ class NetworkWizardPanel {
         this.addEvent('success', 'Debugger attached for interception');
 
         chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.enable', {
-          patterns: [{ requestStage: 'Request' }]
+          patterns: [{ requestStage: 'Request' }, { requestStage: 'Response' }]
         }, () => {
           if (chrome.runtime.lastError) {
             this.addEvent('error', 'Fetch enable failed');
@@ -1488,6 +1533,7 @@ class NetworkWizardPanel {
             this.debuggerAttached = false;
             this.blockedCalls.clear();
             this.overrides.clear();
+            this.delays.clear();
             this.addEvent('warning', 'Debugger detached: ' + reason);
             this.renderCalls();
           }
@@ -1497,7 +1543,8 @@ class NetworkWizardPanel {
   }
 
   handlePausedRequest(params) {
-    const { requestId, request } = params;
+    const { requestId, request, responseStatusCode } = params;
+    const isResponseStage = responseStatusCode !== undefined;
     const url = this.stripQueryParams(request.url);
     const fullUrl = request.url;
     const isGql = url.includes('/graphql');
@@ -1522,6 +1569,27 @@ class NetworkWizardPanel {
       } catch (e) {}
     }
 
+    if (isResponseStage) {
+      const delay = callKey ? this.delays.get(callKey) : null;
+      if (delay && delay.enabled && !delay.deleted && !delay.delayBefore) {
+        setTimeout(() => {
+          chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.continueRequest', {
+            requestId
+          }, () => {
+            if (chrome.runtime.lastError) {}
+          });
+        }, delay.delayMs);
+        return;
+      }
+
+      chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.continueRequest', {
+        requestId
+      }, () => {
+        if (chrome.runtime.lastError) {}
+      });
+      return;
+    }
+
     if (callKey && this.blockedCalls.has(callKey)) {
       chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.failRequest', {
         requestId,
@@ -1536,6 +1604,18 @@ class NetworkWizardPanel {
 
     if (override && override.enabled) {
       this.fulfillWithOverride(requestId, override);
+      return;
+    }
+
+    const delay = callKey ? this.delays.get(callKey) : null;
+    if (delay && delay.enabled && !delay.deleted && delay.delayBefore) {
+      setTimeout(() => {
+        chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.continueRequest', {
+          requestId
+        }, () => {
+          if (chrome.runtime.lastError) {}
+        });
+      }, delay.delayMs);
       return;
     }
 
@@ -1638,7 +1718,9 @@ class NetworkWizardPanel {
       this.blockedCalls.delete(callKey);
       this.addEvent('info', `Un-Blocked: ${callKey}`);
       this.saveBlockedCalls();
-      if (this.blockedCalls.size === 0 && this.overrides.size === 0) {
+      const activeOverrides = Array.from(this.overrides.values()).filter(o => !o.deleted);
+      const activeDelays = Array.from(this.delays.values()).filter(d => !d.deleted);
+      if (this.blockedCalls.size === 0 && activeOverrides.length === 0 && activeDelays.length === 0) {
         this.detachDebugger();
       }
       this.renderCalls();
@@ -1777,7 +1859,239 @@ class NetworkWizardPanel {
     this.addEvent('info', `Permanently deleted override: ${override.callName}`);
 
     const activeOverrides = Array.from(this.overrides.values()).filter(o => !o.deleted);
-    if (this.blockedCalls.size === 0 && activeOverrides.length === 0) {
+    const activeDelays = Array.from(this.delays.values()).filter(d => !d.deleted);
+    if (this.blockedCalls.size === 0 && activeOverrides.length === 0 && activeDelays.length === 0) {
+      this.detachDebugger();
+    }
+  }
+
+  createOrEditDelay(callKey) {
+    const call = this.calls.get(callKey);
+    if (!call) {
+      return;
+    }
+
+    if (!this.delays.has(callKey)) {
+      this.delays.set(callKey, {
+        key: callKey,
+        type: call.type,
+        callName: call.callName,
+        enabled: true,
+        delayMs: 15000,
+        delayBefore: true
+      });
+
+      this.attachDebugger().then(() => {
+        this.saveDelays();
+        this.addEvent('success', `Created delay for: ${call.callName}`);
+      });
+    }
+
+    this.expandedDelay = callKey;
+    this.switchView('delays');
+  }
+
+  renderDelaysList() {
+    const delays = Array.from(this.delays.entries());
+
+    if (delays.length === 0) {
+      this.elements.delaysList.innerHTML = '';
+      this.elements.delaysEmptyState.style.display = 'flex';
+      return;
+    }
+
+    this.elements.delaysEmptyState.style.display = 'none';
+
+    const rows = delays.map(([key, delay]) => {
+      const isExpanded = this.expandedDelay === key && !delay.deleted;
+      const isDeleted = delay.deleted === true;
+      const badgeClass = delay.type === 'GQL' ? 'badge-gql' : 'badge-rest';
+      const rowClass = `delay-row${isExpanded ? ' expanded' : ''}${isDeleted ? ' deleted' : ''}`;
+
+      let actionsHtml;
+      if (isDeleted) {
+        actionsHtml = `
+          <button class="btn btn-sm btn-unblock" data-action="restore" data-key="${this.escapeHtml(key)}">Restore</button>
+          <button class="btn btn-sm btn-danger" data-action="permanent-delete" data-key="${this.escapeHtml(key)}">Remove</button>
+        `;
+      } else {
+        const toggleClass = delay.enabled ? 'btn btn-sm btn-unblock' : 'btn btn-sm btn-secondary';
+        const toggleText = delay.enabled ? 'Enabled' : 'Disabled';
+        actionsHtml = `
+          <button class="${toggleClass}" data-action="toggle-enabled" data-key="${this.escapeHtml(key)}">${toggleText}</button>
+          <button class="btn btn-sm btn-danger" data-action="delete" data-key="${this.escapeHtml(key)}">Delete</button>
+        `;
+      }
+
+      let rowHtml = `
+        <tr class="${rowClass}" data-key="${this.escapeHtml(key)}">
+          <td><span class="expand-icon">${isDeleted ? '' : '▶'}</span> <span class="badge ${badgeClass}">${delay.type}</span></td>
+          <td class="call-name" title="${this.escapeHtml(delay.callName)}">${this.escapeHtml(this.truncateCallName(delay.callName))}</td>
+          <td>${delay.delayMs / 1000}s ${delay.delayBefore ? 'before' : 'after'}</td>
+          <td class="actions-cell">${actionsHtml}</td>
+        </tr>
+      `;
+
+      if (isExpanded) {
+        rowHtml += `<tr class="delay-details visible"><td colspan="4">${this.renderDelayForm(delay, key)}</td></tr>`;
+      }
+
+      return rowHtml;
+    }).join('');
+
+    this.elements.delaysList.innerHTML = `
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Call Name</th>
+            <th>Delay</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    `;
+  }
+
+  renderDelayForm(delay, key) {
+    return `
+      <div class="delay-form">
+        <div class="delay-form-row">
+          <div class="delay-field">
+            <span class="delay-field-label">Delay Duration:</span>
+            <input type="number" class="delay-input" data-field="delaySeconds" data-key="${key}" value="${delay.delayMs / 1000}" min="1" max="300">
+            <span class="delay-unit">seconds</span>
+          </div>
+        </div>
+        <div class="delay-form-row">
+          <div class="delay-field">
+            <span class="delay-field-label">Delay Timing:</span>
+            <div class="delay-toggle-group">
+              <button class="delay-toggle-btn${delay.delayBefore ? ' active' : ''}" data-action="set-timing" data-timing="before" data-key="${key}">Before Request</button>
+              <button class="delay-toggle-btn${!delay.delayBefore ? ' active' : ''}" data-action="set-timing" data-timing="after" data-key="${key}">After Response</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  handleDelaysListClick(e) {
+    const btn = e.target.closest('button[data-action]');
+    if (btn) {
+      const action = btn.dataset.action;
+      const key = btn.dataset.key;
+
+      if (action === 'toggle-enabled') {
+        this.toggleDelayEnabled(key);
+      } else if (action === 'delete') {
+        this.deleteDelay(key);
+      } else if (action === 'restore') {
+        this.restoreDelay(key);
+      } else if (action === 'permanent-delete') {
+        this.permanentlyDeleteDelay(key);
+      } else if (action === 'set-timing') {
+        this.setDelayTiming(key, btn.dataset.timing === 'before');
+      }
+      return;
+    }
+
+    const row = e.target.closest('.delay-row');
+    if (row && !e.target.closest('.actions-cell')) {
+      const key = row.dataset.key;
+      this.expandedDelay = this.expandedDelay === key ? null : key;
+      this.renderDelaysList();
+    }
+  }
+
+  handleDelaysListInput(e) {
+    const target = e.target;
+    if (!target.dataset.key) {
+      return;
+    }
+
+    const key = target.dataset.key;
+    const delay = this.delays.get(key);
+    if (!delay) {
+      return;
+    }
+
+    if (target.dataset.field === 'delaySeconds') {
+      const seconds = parseInt(target.value) || 15;
+      delay.delayMs = Math.max(1, Math.min(300, seconds)) * 1000;
+      this.saveDelays();
+      this.renderCalls();
+    }
+  }
+
+  toggleDelayEnabled(key) {
+    const delay = this.delays.get(key);
+    if (!delay) {
+      return;
+    }
+    delay.enabled = !delay.enabled;
+    this.saveDelays();
+    this.renderDelaysList();
+    this.renderCalls();
+    this.addEvent('info', `Delay ${delay.enabled ? 'enabled' : 'disabled'}: ${delay.callName}`);
+  }
+
+  setDelayTiming(key, delayBefore) {
+    const delay = this.delays.get(key);
+    if (!delay) {
+      return;
+    }
+    delay.delayBefore = delayBefore;
+    this.saveDelays();
+    this.renderDelaysList();
+    this.renderCalls();
+  }
+
+  deleteDelay(key) {
+    const delay = this.delays.get(key);
+    if (!delay) {
+      return;
+    }
+    delay.deleted = true;
+    this.saveDelays();
+    if (this.expandedDelay === key) {
+      this.expandedDelay = null;
+    }
+    this.renderDelaysList();
+    this.renderCalls();
+    this.addEvent('info', `Deleted delay: ${delay.callName}`);
+  }
+
+  restoreDelay(key) {
+    const delay = this.delays.get(key);
+    if (!delay) {
+      return;
+    }
+    delay.deleted = false;
+    this.saveDelays();
+    this.renderDelaysList();
+    this.renderCalls();
+    this.addEvent('info', `Restored delay: ${delay.callName}`);
+  }
+
+  permanentlyDeleteDelay(key) {
+    const delay = this.delays.get(key);
+    if (!delay) {
+      return;
+    }
+    this.delays.delete(key);
+    this.saveDelays();
+    if (this.expandedDelay === key) {
+      this.expandedDelay = null;
+    }
+    this.renderDelaysList();
+    this.renderCalls();
+    this.addEvent('info', `Permanently deleted delay: ${delay.callName}`);
+
+    const activeOverrides = Array.from(this.overrides.values()).filter(o => !o.deleted);
+    const activeDelays = Array.from(this.delays.values()).filter(d => !d.deleted);
+    if (this.blockedCalls.size === 0 && activeOverrides.length === 0 && activeDelays.length === 0) {
       this.detachDebugger();
     }
   }
@@ -1847,23 +2161,36 @@ class NetworkWizardPanel {
       const override = this.overrides.get(key);
       const hasOverride = override !== undefined && !override.deleted;
       const overrideEnabled = hasOverride && override.enabled;
+      const delay = this.delays.get(key);
+      const hasDelay = delay !== undefined && !delay.deleted;
+      const delayEnabled = hasDelay && delay.enabled;
       const badgeClass = call.type === 'GQL' ? 'badge-gql' : 'badge-rest';
       const statusClass = isPending ? 'text-muted' : (call.hasError ? 'text-error' : 'text-success');
-      const rowClass = `call-row${isExpanded ? ' expanded' : ''}${isPending ? ' pending' : ''}${isBlocked ? ' blocked' : ''}${overrideEnabled ? ' overridden' : ''}`;
+      const rowClass = `call-row${isExpanded ? ' expanded' : ''}${isPending ? ' pending' : ''}${isBlocked ? ' blocked' : ''}${overrideEnabled ? ' overridden' : ''}${delayEnabled ? ' delayed' : ''}`;
       const blockBtnClass = isBlocked ? 'btn btn-sm btn-unblock' : 'btn btn-sm btn-danger';
       const blockBtnText = isBlocked ? 'Un-Block' : 'Block';
       const blockAction = isBlocked ? 'unblock' : 'block';
       const overrideBtnClass = hasOverride ? 'btn btn-sm btn-override-active' : 'btn btn-sm btn-primary';
       const overrideBtnText = hasOverride ? 'Edit Override' : 'Override';
+      const delayBtnClass = hasDelay ? 'btn btn-sm btn-delay-active' : 'btn btn-sm btn-delay';
+      const delayBtnText = hasDelay ? 'Edit Delay' : 'Delay';
+      let statusIndicators = '';
+      if (overrideEnabled) {
+        statusIndicators += '<span class="override-indicator" title="Override active">⚡</span>';
+      }
+      if (delayEnabled) {
+        statusIndicators += `<span class="delay-indicator" title="Delay active: ${delay.delayMs / 1000}s ${delay.delayBefore ? 'before' : 'after'}">⏱</span>`;
+      }
 
       rows.push(`
         <tr class="${rowClass}" data-call-key="${this.escapeHtml(key)}">
           <td><span class="expand-icon">${isPending ? '<span class="spinner"></span>' : '▶'}</span> <span class="badge ${badgeClass}">${call.type}</span></td>
           <td class="method-cell">${call.method}</td>
           <td class="call-name" title="${this.escapeHtml(call.callName)}">${this.escapeHtml(this.truncateCallName(call.callName))}</td>
-          <td><span class="font-semibold ${statusClass}">${isPending ? 'Loading...' : call.status}</span>${overrideEnabled ? '<span class="override-indicator" title="Override active">⚡</span>' : ''}</td>
+          <td><span class="font-semibold ${statusClass}">${isPending ? 'Loading...' : call.status}</span>${statusIndicators}</td>
           <td class="actions-cell">
             <button class="${overrideBtnClass}" data-action="override" data-key="${this.escapeHtml(key)}"${isPending ? ' disabled' : ''}>${overrideBtnText}</button>
+            <button class="${delayBtnClass}" data-action="delay" data-key="${this.escapeHtml(key)}"${isPending ? ' disabled' : ''}>${delayBtnText}</button>
             <button class="${blockBtnClass}" data-action="${blockAction}" data-key="${this.escapeHtml(key)}"${isPending ? ' disabled' : ''}>${blockBtnText}</button>
             <div class="kebab-menu">
               <button class="kebab-btn" data-key="${this.escapeHtml(key)}"${isPending ? ' disabled' : ''}>⋮</button>
