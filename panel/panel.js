@@ -5,8 +5,9 @@ class NetworkWizardPanel {
     this.pendingRequests = new Map();
     this.overrides = new Map();
     this.delays = new Map();
-    this.blockedCalls = new Set();
-    this.blockedListSnapshot = new Set();
+    this.blockedCalls = new Map();
+    this.blockedListSnapshot = new Map();
+    this.scopeFilter = 'all';
     this.expandedCall = null;
     this.expandedOverride = null;
     this.expandedDelay = null;
@@ -58,14 +59,27 @@ class NetworkWizardPanel {
   loadBlockedCalls() {
     chrome.devtools.inspectedWindow.eval('window.location.origin', (origin) => {
       this.currentOrigin = origin;
-      chrome.storage.local.get(['blockedCalls'], (result) => {
+      chrome.storage.local.get(['blockedCalls', 'blockedCallsGlobal'], (result) => {
         const allBlocked = result.blockedCalls || {};
-        const blocked = allBlocked[origin] || [];
-        if (blocked.length > 0) {
+        const globalBlocked = result.blockedCallsGlobal || [];
+        const siteBlocked = allBlocked[origin] || [];
+
+        const allEntries = [
+          ...globalBlocked.map(b => typeof b === 'string' ? { key: b, scope: 'global' } : b),
+          ...siteBlocked.map(b => typeof b === 'string' ? { key: b, scope: 'site', scopeOrigin: origin } : b)
+        ];
+
+        if (allEntries.length > 0) {
           this.attachDebugger().then(() => {
-            blocked.forEach(key => this.blockedCalls.add(key));
+            allEntries.forEach(block => {
+              this.blockedCalls.set(block.key, {
+                key: block.key,
+                scope: block.scope || 'site',
+                scopeOrigin: block.scopeOrigin || origin
+              });
+            });
             this.renderCalls();
-            this.addEvent('info', `Restored ${blocked.length} blocked call(s)`);
+            this.addEvent('info', `Restored ${allEntries.length} blocked call(s)`);
           });
         }
       });
@@ -76,28 +90,50 @@ class NetworkWizardPanel {
     if (!this.currentOrigin) {
       return;
     }
-    chrome.storage.local.get(['blockedCalls'], (result) => {
+    chrome.storage.local.get(['blockedCalls', 'blockedCallsGlobal'], (result) => {
       const allBlocked = result.blockedCalls || {};
-      if (this.blockedCalls.size > 0) {
-        allBlocked[this.currentOrigin] = Array.from(this.blockedCalls);
+      const globalBlocked = [];
+      const siteBlocked = [];
+
+      this.blockedCalls.forEach((block) => {
+        if (block.scope === 'global') {
+          globalBlocked.push(block);
+        } else if (block.scopeOrigin === this.currentOrigin) {
+          siteBlocked.push(block);
+        }
+      });
+
+      if (siteBlocked.length > 0) {
+        allBlocked[this.currentOrigin] = siteBlocked;
       } else {
         delete allBlocked[this.currentOrigin];
       }
-      chrome.storage.local.set({ blockedCalls: allBlocked });
+
+      chrome.storage.local.set({
+        blockedCalls: allBlocked,
+        blockedCallsGlobal: globalBlocked
+      });
     });
   }
 
   loadOverrides() {
     chrome.devtools.inspectedWindow.eval('window.location.origin', (origin) => {
       this.currentOrigin = origin;
-      chrome.storage.local.get(['overrides'], (result) => {
+      chrome.storage.local.get(['overrides', 'overridesGlobal'], (result) => {
         const allOverrides = result.overrides || {};
-        const overrides = allOverrides[origin] || [];
-        if (overrides.length > 0) {
+        const globalOverrides = result.overridesGlobal || [];
+        const siteOverrides = allOverrides[origin] || [];
+
+        const allEntries = [
+          ...globalOverrides.map(o => ({ ...o, scope: 'global' })),
+          ...siteOverrides.map(o => ({ ...o, scope: o.scope || 'site', scopeOrigin: o.scopeOrigin || origin }))
+        ];
+
+        if (allEntries.length > 0) {
           this.attachDebugger().then(() => {
-            overrides.forEach(o => this.overrides.set(o.key, o));
+            allEntries.forEach(o => this.overrides.set(o.key, o));
             this.renderOverridesList();
-            this.addEvent('info', `Restored ${overrides.length} override(s)`);
+            this.addEvent('info', `Restored ${allEntries.length} override(s)`);
           });
         }
       });
@@ -108,28 +144,50 @@ class NetworkWizardPanel {
     if (!this.currentOrigin) {
       return;
     }
-    chrome.storage.local.get(['overrides'], (result) => {
+    chrome.storage.local.get(['overrides', 'overridesGlobal'], (result) => {
       const allOverrides = result.overrides || {};
-      if (this.overrides.size > 0) {
-        allOverrides[this.currentOrigin] = Array.from(this.overrides.values());
+      const globalOverrides = [];
+      const siteOverrides = [];
+
+      this.overrides.forEach((override) => {
+        if (override.scope === 'global') {
+          globalOverrides.push(override);
+        } else if (!override.scopeOrigin || override.scopeOrigin === this.currentOrigin) {
+          siteOverrides.push({ ...override, scopeOrigin: this.currentOrigin });
+        }
+      });
+
+      if (siteOverrides.length > 0) {
+        allOverrides[this.currentOrigin] = siteOverrides;
       } else {
         delete allOverrides[this.currentOrigin];
       }
-      chrome.storage.local.set({ overrides: allOverrides });
+
+      chrome.storage.local.set({
+        overrides: allOverrides,
+        overridesGlobal: globalOverrides
+      });
     });
   }
 
   loadDelays() {
     chrome.devtools.inspectedWindow.eval('window.location.origin', (origin) => {
       this.currentOrigin = origin;
-      chrome.storage.local.get(['delays'], (result) => {
+      chrome.storage.local.get(['delays', 'delaysGlobal'], (result) => {
         const allDelays = result.delays || {};
-        const delays = allDelays[origin] || [];
-        if (delays.length > 0) {
+        const globalDelays = result.delaysGlobal || [];
+        const siteDelays = allDelays[origin] || [];
+
+        const allEntries = [
+          ...globalDelays.map(d => ({ ...d, scope: 'global' })),
+          ...siteDelays.map(d => ({ ...d, scope: d.scope || 'site', scopeOrigin: d.scopeOrigin || origin }))
+        ];
+
+        if (allEntries.length > 0) {
           this.attachDebugger().then(() => {
-            delays.forEach(d => this.delays.set(d.key, d));
+            allEntries.forEach(d => this.delays.set(d.key, d));
             this.renderDelaysList();
-            this.addEvent('info', `Restored ${delays.length} delay(s)`);
+            this.addEvent('info', `Restored ${allEntries.length} delay(s)`);
           });
         }
       });
@@ -140,14 +198,29 @@ class NetworkWizardPanel {
     if (!this.currentOrigin) {
       return;
     }
-    chrome.storage.local.get(['delays'], (result) => {
+    chrome.storage.local.get(['delays', 'delaysGlobal'], (result) => {
       const allDelays = result.delays || {};
-      if (this.delays.size > 0) {
-        allDelays[this.currentOrigin] = Array.from(this.delays.values());
+      const globalDelays = [];
+      const siteDelays = [];
+
+      this.delays.forEach((delay) => {
+        if (delay.scope === 'global') {
+          globalDelays.push(delay);
+        } else if (!delay.scopeOrigin || delay.scopeOrigin === this.currentOrigin) {
+          siteDelays.push({ ...delay, scopeOrigin: this.currentOrigin });
+        }
+      });
+
+      if (siteDelays.length > 0) {
+        allDelays[this.currentOrigin] = siteDelays;
       } else {
         delete allDelays[this.currentOrigin];
       }
-      chrome.storage.local.set({ delays: allDelays });
+
+      chrome.storage.local.set({
+        delays: allDelays,
+        delaysGlobal: globalDelays
+      });
     });
   }
 
@@ -281,6 +354,7 @@ class NetworkWizardPanel {
 
   switchView(view) {
     this.currentView = view;
+    this.scopeFilter = 'all';
 
     this.elements.headerTabs.querySelectorAll('.header-tab').forEach(t => {
       t.classList.toggle('active', t.dataset.view === view);
@@ -292,7 +366,7 @@ class NetworkWizardPanel {
     this.elements.delaysView.classList.toggle('hidden', view !== 'delays');
 
     if (view === 'blocked') {
-      this.blockedListSnapshot = new Set(this.blockedCalls);
+      this.blockedListSnapshot = new Map(this.blockedCalls);
       this.renderBlockedList();
     } else if (view === 'overrides') {
       this.renderOverridesList();
@@ -301,8 +375,57 @@ class NetworkWizardPanel {
     }
   }
 
+  renderScopeFilterToolbar() {
+    return `
+      <div class="scope-filter-toolbar">
+        <span class="scope-filter-label">Show:</span>
+        <div class="scope-filter-group">
+          <button class="scope-filter-btn${this.scopeFilter === 'all' ? ' active' : ''}" data-action="set-scope-filter" data-filter="all">All</button>
+          <button class="scope-filter-btn${this.scopeFilter === 'global' ? ' active' : ''}" data-action="set-scope-filter" data-filter="global">Global Only</button>
+          <button class="scope-filter-btn${this.scopeFilter === 'site' ? ' active' : ''}" data-action="set-scope-filter" data-filter="site">This Site Only</button>
+        </div>
+      </div>
+    `;
+  }
+
+  setScopeFilter(filter) {
+    this.scopeFilter = filter;
+    if (this.currentView === 'blocked') {
+      this.renderBlockedList();
+    } else if (this.currentView === 'overrides') {
+      this.renderOverridesList();
+    } else if (this.currentView === 'delays') {
+      this.renderDelaysList();
+    }
+  }
+
+  filterByScope(entries, isMap = false) {
+    if (this.scopeFilter === 'all') {
+      return entries;
+    }
+
+    if (isMap) {
+      return Array.from(entries).filter(([, item]) => {
+        const scope = item.scope || 'site';
+        if (this.scopeFilter === 'global') {
+          return scope === 'global';
+        }
+        return scope === 'site' && (item.scopeOrigin === this.currentOrigin || !item.scopeOrigin);
+      });
+    }
+
+    return entries.filter(item => {
+      const scope = item.scope || 'site';
+      if (this.scopeFilter === 'global') {
+        return scope === 'global';
+      }
+      return scope === 'site' && (item.scopeOrigin === this.currentOrigin || !item.scopeOrigin);
+    });
+  }
+
   renderBlockedList() {
-    const snapshot = this.blockedListSnapshot || new Set();
+    const snapshot = this.blockedListSnapshot || new Map();
+    const filtered = this.filterByScope(snapshot.entries(), true);
 
     if (snapshot.size === 0) {
       this.elements.blockedList.innerHTML = '';
@@ -311,28 +434,42 @@ class NetworkWizardPanel {
     }
 
     this.elements.blockedEmptyState.style.display = 'none';
+
+    const filterToolbar = this.renderScopeFilterToolbar();
+    const hasFilteredResults = filtered.length > 0;
+
     this.elements.blockedList.innerHTML = `
+      ${filterToolbar}
       <table class="table">
         <thead>
           <tr>
             <th>Type</th>
             <th>Call Name</th>
+            <th>Scope</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody>
-          ${Array.from(snapshot).map(key => {
+          ${!hasFilteredResults ? `<tr><td colspan="4" class="no-filter-results">No ${this.scopeFilter === 'global' ? 'global' : 'site-specific'} blocked calls</td></tr>` : ''}
+          ${filtered.map(([key, block]) => {
             const isGql = key.startsWith('gql:');
             const name = key.replace(/^(gql:|rest:)/, '');
             const badgeClass = isGql ? 'badge-gql' : 'badge-rest';
-            const isCurrentlyBlocked = this.blockedCalls.has(key);
+            const isCurrentlyBlocked = this.isBlockedForCurrentSite(key);
             const btnClass = isCurrentlyBlocked ? 'btn btn-sm btn-unblock' : 'btn btn-sm btn-danger';
             const btnText = isCurrentlyBlocked ? 'Un-Block' : 'Block';
             const action = isCurrentlyBlocked ? 'unblock' : 'block';
+            const scope = block.scope || 'site';
+            const scopeLabel = scope === 'global' ? 'All Sites' : this.truncateScopeOrigin(block.scopeOrigin || this.currentOrigin);
+            const scopeBadgeClass = scope === 'global' ? 'scope-badge-global' : 'scope-badge-site';
             return `
               <tr>
                 <td><span class="badge ${badgeClass}">${isGql ? 'GQL' : 'REST'}</span></td>
                 <td class="call-name" title="${this.escapeHtml(name)}">${this.escapeHtml(this.truncateCallName(name))}</td>
+                <td>
+                  <span class="scope-badge ${scopeBadgeClass}" title="${scope === 'global' ? 'Applies to all sites' : block.scopeOrigin || this.currentOrigin}">${scopeLabel}</span>
+                  <button class="btn btn-sm btn-secondary btn-scope-toggle" data-action="toggle-scope" data-key="${this.escapeHtml(key)}" title="Toggle scope">${scope === 'global' ? '🌐→📍' : '📍→🌐'}</button>
+                </td>
                 <td>
                   <button class="${btnClass}" data-action="${action}" data-key="${this.escapeHtml(key)}">${btnText}</button>
                 </td>
@@ -344,13 +481,53 @@ class NetworkWizardPanel {
     `;
   }
 
+  truncateScopeOrigin(origin) {
+    if (!origin) {
+      return 'This Site';
+    }
+    try {
+      const url = new URL(origin);
+      return url.hostname.length > 25 ? url.hostname.substring(0, 22) + '...' : url.hostname;
+    } catch (e) {
+      return origin.length > 25 ? origin.substring(0, 22) + '...' : origin;
+    }
+  }
+
   handleBlockedListClick(e) {
     const btn = e.target.closest('.btn[data-action]');
-    if (btn && (btn.dataset.action === 'unblock' || btn.dataset.action === 'block')) {
+    if (!btn) {
+      return;
+    }
+
+    if (btn.dataset.action === 'unblock' || btn.dataset.action === 'block') {
       this.toggleBlock(btn.dataset.key).then(() => {
         this.renderBlockedList();
       });
+    } else if (btn.dataset.action === 'toggle-scope') {
+      this.toggleBlockedScope(btn.dataset.key);
+    } else if (btn.dataset.action === 'set-scope-filter') {
+      this.setScopeFilter(btn.dataset.filter);
     }
+  }
+
+  toggleBlockedScope(key) {
+    const block = this.blockedCalls.get(key);
+    if (!block) {
+      return;
+    }
+
+    if (block.scope === 'global') {
+      block.scope = 'site';
+      block.scopeOrigin = this.currentOrigin;
+    } else {
+      block.scope = 'global';
+      delete block.scopeOrigin;
+    }
+
+    this.blockedListSnapshot = new Map(this.blockedCalls);
+    this.saveBlockedCalls();
+    this.renderBlockedList();
+    this.addEvent('info', `Block scope changed to ${block.scope === 'global' ? 'All Sites' : 'This Site'}`);
   }
 
   renderOverridesList() {
@@ -383,18 +560,29 @@ class NetworkWizardPanel {
 
     this.elements.overridesEmptyState.style.display = 'none';
 
+    const filtered = this.filterByScope(overrides, true);
+    const hasFilteredResults = filtered.length > 0;
+
     const toolbarHtml = `
+      ${this.renderScopeFilterToolbar()}
       <div class="overrides-toolbar">
         <button class="btn btn-sm btn-secondary" data-action="import-full">Import Override</button>
         <button class="btn btn-sm btn-secondary" data-action="export-all">Export All</button>
       </div>
     `;
 
-    const rows = overrides.map(([key, override]) => {
+    const noResultsRow = !hasFilteredResults
+      ? `<tr><td colspan="4" class="no-filter-results">No ${this.scopeFilter === 'global' ? 'global' : 'site-specific'} overrides</td></tr>`
+      : '';
+
+    const rows = filtered.map(([key, override]) => {
       const isExpanded = this.expandedOverride === key && !override.deleted;
       const isDeleted = override.deleted === true;
       const badgeClass = override.type === 'GQL' ? 'badge-gql' : 'badge-rest';
       const rowClass = `override-row${isExpanded ? ' expanded' : ''}${isDeleted ? ' deleted' : ''}`;
+      const scope = override.scope || 'site';
+      const scopeLabel = scope === 'global' ? 'All Sites' : this.truncateScopeOrigin(override.scopeOrigin || this.currentOrigin);
+      const scopeBadgeClass = scope === 'global' ? 'scope-badge-global' : 'scope-badge-site';
 
       let actionsHtml;
       if (isDeleted) {
@@ -416,12 +604,13 @@ class NetworkWizardPanel {
         <tr class="${rowClass}" data-key="${this.escapeHtml(key)}">
           <td><span class="expand-icon">${isDeleted ? '' : '▶'}</span> <span class="badge ${badgeClass}">${override.type}</span></td>
           <td class="call-name" title="${this.escapeHtml(override.callName)}">${this.escapeHtml(this.truncateCallName(override.callName))}</td>
+          <td><span class="scope-badge ${scopeBadgeClass}" title="${scope === 'global' ? 'Applies to all sites' : override.scopeOrigin || this.currentOrigin}">${scopeLabel}</span></td>
           <td class="actions-cell">${actionsHtml}</td>
         </tr>
       `;
 
       if (isExpanded) {
-        rowHtml += `<tr class="override-details visible"><td colspan="3">${this.renderOverrideForm(override, key)}</td></tr>`;
+        rowHtml += `<tr class="override-details visible"><td colspan="4">${this.renderOverrideForm(override, key)}</td></tr>`;
       }
 
       return rowHtml;
@@ -434,10 +623,11 @@ class NetworkWizardPanel {
           <tr>
             <th>Type</th>
             <th>Call Name</th>
+            <th>Scope</th>
             <th>Actions</th>
           </tr>
         </thead>
-        <tbody>${rows}</tbody>
+        <tbody>${noResultsRow}${rows}</tbody>
       </table>
     `;
 
@@ -486,8 +676,24 @@ class NetworkWizardPanel {
       : this.renderMatchEditor(matchValue, matchField, key);
     const headersHtml = this.renderHeadersEditor(override.responseHeaders, headersViewMode, key);
 
+    const scope = override.scope || 'site';
+    const scopeOrigin = override.scopeOrigin || this.currentOrigin;
+
     return `
       <div class="override-form">
+        <div class="override-section">
+          <div class="override-section-header">
+            <span class="override-section-title">Scope</span>
+          </div>
+          <div class="scope-toggle-row">
+            <div class="scope-toggle-group">
+              <button class="scope-toggle-btn${scope === 'site' ? ' active' : ''}" data-action="set-scope" data-scope="site" data-key="${key}">This Site Only</button>
+              <button class="scope-toggle-btn${scope === 'global' ? ' active' : ''}" data-action="set-scope" data-scope="global" data-key="${key}">All Sites</button>
+            </div>
+            <span class="scope-origin-label ${scope === 'global' ? 'hidden' : ''}" data-scope-origin="${key}">${this.escapeHtml(scopeOrigin)}</span>
+          </div>
+        </div>
+
         <div class="override-section">
           <div class="override-section-header">
             <span class="override-section-title">${matchLabel}</span>
@@ -721,6 +927,10 @@ class NetworkWizardPanel {
         this.removeMatchEntry(key, btn.dataset.field, parseInt(btn.dataset.idx));
       } else if (action === 'restore-match') {
         this.restoreMatchEntry(key, btn.dataset.field, parseInt(btn.dataset.idx));
+      } else if (action === 'set-scope') {
+        this.setOverrideScope(key, btn.dataset.scope);
+      } else if (action === 'set-scope-filter') {
+        this.setScopeFilter(btn.dataset.filter);
       }
       return;
     }
@@ -1002,8 +1212,12 @@ class NetworkWizardPanel {
               type: o.type,
               callName: o.callName,
               enabled: o.enabled !== false,
+              scope: o.scope || 'site',
+              scopeOrigin: o.scopeOrigin || this.currentOrigin,
               matchParams: o.matchParams || null,
+              matchParamsEnabled: o.matchParamsEnabled || false,
               matchVariables: o.matchVariables || null,
+              matchVariablesEnabled: o.matchVariablesEnabled || false,
               statusCode: o.statusCode || null,
               statusText: o.statusText || null,
               responseHeaders: o.responseHeaders || null,
@@ -1570,7 +1784,7 @@ class NetworkWizardPanel {
     }
 
     if (isResponseStage) {
-      const delay = callKey ? this.delays.get(callKey) : null;
+      const delay = callKey ? this.getDelayForCurrentSite(callKey) : null;
       if (delay && delay.enabled && !delay.deleted && !delay.delayBefore) {
         setTimeout(() => {
           chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.continueRequest', {
@@ -1590,7 +1804,7 @@ class NetworkWizardPanel {
       return;
     }
 
-    if (callKey && this.blockedCalls.has(callKey)) {
+    if (callKey && this.isBlockedForCurrentSite(callKey)) {
       chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.failRequest', {
         requestId,
         errorReason: 'BlockedByClient'
@@ -1607,15 +1821,15 @@ class NetworkWizardPanel {
       return;
     }
 
-    const delay = callKey ? this.delays.get(callKey) : null;
-    if (delay && delay.enabled && !delay.deleted && delay.delayBefore) {
+    const delayBeforeReq = callKey ? this.getDelayForCurrentSite(callKey) : null;
+    if (delayBeforeReq && delayBeforeReq.enabled && !delayBeforeReq.deleted && delayBeforeReq.delayBefore) {
       setTimeout(() => {
         chrome.debugger.sendCommand({ tabId: this.tabId }, 'Fetch.continueRequest', {
           requestId
         }, () => {
           if (chrome.runtime.lastError) {}
         });
-      }, delay.delayMs);
+      }, delayBeforeReq.delayMs);
       return;
     }
 
@@ -1626,9 +1840,41 @@ class NetworkWizardPanel {
     });
   }
 
+  getDelayForCurrentSite(callKey) {
+    const delay = this.delays.get(callKey);
+    if (!delay || delay.deleted) {
+      return null;
+    }
+    if (delay.scope === 'global') {
+      return delay;
+    }
+    if (delay.scopeOrigin === this.currentOrigin) {
+      return delay;
+    }
+    return null;
+  }
+
+  getOverrideForCurrentSite(callKey) {
+    const override = this.overrides.get(callKey);
+    if (!override || override.deleted) {
+      return null;
+    }
+    if (override.scope === 'global') {
+      return override;
+    }
+    if (override.scopeOrigin === this.currentOrigin) {
+      return override;
+    }
+    return null;
+  }
+
   findMatchingOverride(callKey, params, isGql) {
     const override = this.overrides.get(callKey);
     if (!override || override.deleted) {
+      return null;
+    }
+
+    if (override.scope !== 'global' && override.scopeOrigin !== this.currentOrigin) {
       return null;
     }
 
@@ -1713,6 +1959,17 @@ class NetworkWizardPanel {
     });
   }
 
+  isBlockedForCurrentSite(callKey) {
+    const block = this.blockedCalls.get(callKey);
+    if (!block) {
+      return false;
+    }
+    if (block.scope === 'global') {
+      return true;
+    }
+    return block.scopeOrigin === this.currentOrigin;
+  }
+
   toggleBlock(callKey) {
     if (this.blockedCalls.has(callKey)) {
       this.blockedCalls.delete(callKey);
@@ -1727,7 +1984,11 @@ class NetworkWizardPanel {
       return Promise.resolve();
     } else {
       return this.attachDebugger().then(() => {
-        this.blockedCalls.add(callKey);
+        this.blockedCalls.set(callKey, {
+          key: callKey,
+          scope: 'site',
+          scopeOrigin: this.currentOrigin
+        });
         this.addEvent('success', `Blocking: ${callKey}`);
         this.saveBlockedCalls();
         this.renderCalls();
@@ -1786,6 +2047,8 @@ class NetworkWizardPanel {
         type: call.type,
         callName: call.callName,
         enabled: true,
+        scope: 'site',
+        scopeOrigin: this.currentOrigin,
         matchParams,
         matchParamsEnabled,
         matchVariables,
@@ -1815,6 +2078,22 @@ class NetworkWizardPanel {
     this.saveOverrides();
     this.renderOverridesList();
     this.addEvent('info', `Override ${override.enabled ? 'enabled' : 'disabled'}: ${override.callName}`);
+  }
+
+  setOverrideScope(key, scope) {
+    const override = this.overrides.get(key);
+    if (!override) {
+      return;
+    }
+    override.scope = scope;
+    if (scope === 'site') {
+      override.scopeOrigin = this.currentOrigin;
+    } else {
+      delete override.scopeOrigin;
+    }
+    this.saveOverrides();
+    this.renderOverridesList();
+    this.addEvent('info', `Override scope changed to ${scope === 'global' ? 'All Sites' : 'This Site'}`);
   }
 
   deleteOverride(key) {
@@ -1877,6 +2156,8 @@ class NetworkWizardPanel {
         type: call.type,
         callName: call.callName,
         enabled: true,
+        scope: 'site',
+        scopeOrigin: this.currentOrigin,
         delayMs: 15000,
         delayBefore: true
       });
@@ -1902,11 +2183,21 @@ class NetworkWizardPanel {
 
     this.elements.delaysEmptyState.style.display = 'none';
 
-    const rows = delays.map(([key, delay]) => {
+    const filtered = this.filterByScope(delays, true);
+    const hasFilteredResults = filtered.length > 0;
+
+    const noResultsRow = !hasFilteredResults
+      ? `<tr><td colspan="5" class="no-filter-results">No ${this.scopeFilter === 'global' ? 'global' : 'site-specific'} delays</td></tr>`
+      : '';
+
+    const rows = filtered.map(([key, delay]) => {
       const isExpanded = this.expandedDelay === key && !delay.deleted;
       const isDeleted = delay.deleted === true;
       const badgeClass = delay.type === 'GQL' ? 'badge-gql' : 'badge-rest';
       const rowClass = `delay-row${isExpanded ? ' expanded' : ''}${isDeleted ? ' deleted' : ''}`;
+      const scope = delay.scope || 'site';
+      const scopeLabel = scope === 'global' ? 'All Sites' : this.truncateScopeOrigin(delay.scopeOrigin || this.currentOrigin);
+      const scopeBadgeClass = scope === 'global' ? 'scope-badge-global' : 'scope-badge-site';
 
       let actionsHtml;
       if (isDeleted) {
@@ -1927,36 +2218,52 @@ class NetworkWizardPanel {
         <tr class="${rowClass}" data-key="${this.escapeHtml(key)}">
           <td><span class="expand-icon">${isDeleted ? '' : '▶'}</span> <span class="badge ${badgeClass}">${delay.type}</span></td>
           <td class="call-name" title="${this.escapeHtml(delay.callName)}">${this.escapeHtml(this.truncateCallName(delay.callName))}</td>
+          <td><span class="scope-badge ${scopeBadgeClass}" title="${scope === 'global' ? 'Applies to all sites' : delay.scopeOrigin || this.currentOrigin}">${scopeLabel}</span></td>
           <td>${delay.delayMs / 1000}s ${delay.delayBefore ? 'before' : 'after'}</td>
           <td class="actions-cell">${actionsHtml}</td>
         </tr>
       `;
 
       if (isExpanded) {
-        rowHtml += `<tr class="delay-details visible"><td colspan="4">${this.renderDelayForm(delay, key)}</td></tr>`;
+        rowHtml += `<tr class="delay-details visible"><td colspan="5">${this.renderDelayForm(delay, key)}</td></tr>`;
       }
 
       return rowHtml;
     }).join('');
 
     this.elements.delaysList.innerHTML = `
+      ${this.renderScopeFilterToolbar()}
       <table class="table">
         <thead>
           <tr>
             <th>Type</th>
             <th>Call Name</th>
+            <th>Scope</th>
             <th>Delay</th>
             <th>Actions</th>
           </tr>
         </thead>
-        <tbody>${rows}</tbody>
+        <tbody>${noResultsRow}${rows}</tbody>
       </table>
     `;
   }
 
   renderDelayForm(delay, key) {
+    const scope = delay.scope || 'site';
+    const scopeOrigin = delay.scopeOrigin || this.currentOrigin;
+
     return `
       <div class="delay-form">
+        <div class="delay-form-row">
+          <div class="delay-field">
+            <span class="delay-field-label">Scope:</span>
+            <div class="scope-toggle-group">
+              <button class="scope-toggle-btn${scope === 'site' ? ' active' : ''}" data-action="set-delay-scope" data-scope="site" data-key="${key}">This Site Only</button>
+              <button class="scope-toggle-btn${scope === 'global' ? ' active' : ''}" data-action="set-delay-scope" data-scope="global" data-key="${key}">All Sites</button>
+            </div>
+            <span class="scope-origin-label ${scope === 'global' ? 'hidden' : ''}">${this.escapeHtml(scopeOrigin)}</span>
+          </div>
+        </div>
         <div class="delay-form-row">
           <div class="delay-field">
             <span class="delay-field-label">Delay Duration:</span>
@@ -1993,6 +2300,10 @@ class NetworkWizardPanel {
         this.permanentlyDeleteDelay(key);
       } else if (action === 'set-timing') {
         this.setDelayTiming(key, btn.dataset.timing === 'before');
+      } else if (action === 'set-delay-scope') {
+        this.setDelayScope(key, btn.dataset.scope);
+      } else if (action === 'set-scope-filter') {
+        this.setScopeFilter(btn.dataset.filter);
       }
       return;
     }
@@ -2046,6 +2357,22 @@ class NetworkWizardPanel {
     this.saveDelays();
     this.renderDelaysList();
     this.renderCalls();
+  }
+
+  setDelayScope(key, scope) {
+    const delay = this.delays.get(key);
+    if (!delay) {
+      return;
+    }
+    delay.scope = scope;
+    if (scope === 'site') {
+      delay.scopeOrigin = this.currentOrigin;
+    } else {
+      delete delay.scopeOrigin;
+    }
+    this.saveDelays();
+    this.renderDelaysList();
+    this.addEvent('info', `Delay scope changed to ${scope === 'global' ? 'All Sites' : 'This Site'}`);
   }
 
   deleteDelay(key) {
@@ -2157,12 +2484,12 @@ class NetworkWizardPanel {
     filtered.forEach(([key, call]) => {
       const isExpanded = this.expandedCall === key;
       const isPending = call.pending;
-      const isBlocked = this.blockedCalls.has(key);
-      const override = this.overrides.get(key);
-      const hasOverride = override !== undefined && !override.deleted;
+      const isBlocked = this.isBlockedForCurrentSite(key);
+      const override = this.getOverrideForCurrentSite(key);
+      const hasOverride = override !== null;
       const overrideEnabled = hasOverride && override.enabled;
-      const delay = this.delays.get(key);
-      const hasDelay = delay !== undefined && !delay.deleted;
+      const delay = this.getDelayForCurrentSite(key);
+      const hasDelay = delay !== null;
       const delayEnabled = hasDelay && delay.enabled;
       const badgeClass = call.type === 'GQL' ? 'badge-gql' : 'badge-rest';
       const statusClass = isPending ? 'text-muted' : (call.hasError ? 'text-error' : 'text-success');
