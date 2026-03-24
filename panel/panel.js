@@ -1537,6 +1537,7 @@ class NetworkWizardPanel {
       const parsed = JSON.parse(body);
       if (parsed.errors?.length > 0) {
         callData.hasError = true;
+        callData.statusCode = callData.status;
         callData.status = '200 (GQL Error)';
       }
     } catch (e) {}
@@ -2105,7 +2106,7 @@ class NetworkWizardPanel {
         matchParamsEnabled,
         matchVariables,
         matchVariablesEnabled,
-        statusCode: call.status,
+        statusCode: call.statusCode || call.status,
         statusText: call.statusText || '',
         responseHeaders,
         responseBody: this.formatJsonString(call.responseBody)
