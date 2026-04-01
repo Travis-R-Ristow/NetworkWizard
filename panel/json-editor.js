@@ -344,15 +344,50 @@ class JsonEditor {
     } else {
       this.value = value || '';
     }
-    
+
     this.parseJson();
-    
+
     if (this.mode === 'tree') {
       this.renderTree();
     } else {
       this.elements.textView.value = this.value;
     }
-    
+
+    this.updateStatus();
+  }
+
+  updateValue(value) {
+    const scrollTop = this.elements.treeView.scrollTop;
+    const searchQuery = this.searchState.query;
+    const searchCurrentIndex = this.searchState.currentIndex;
+    const preservedCollapsedPaths = new Set(this.collapsedPaths);
+
+    if (typeof value === 'object') {
+      this.value = JSON.stringify(value, null, 2);
+    } else {
+      this.value = value || '';
+    }
+
+    this.parseJson();
+    this.collapsedPaths = preservedCollapsedPaths;
+
+    if (this.mode === 'tree') {
+      this.renderTree();
+      this.elements.treeView.scrollTop = scrollTop;
+    } else {
+      this.elements.textView.value = this.value;
+    }
+
+    if (searchQuery) {
+      this.searchState.query = searchQuery;
+      this.searchState.currentIndex = searchCurrentIndex;
+      this.handleSearch(searchQuery);
+      if (searchCurrentIndex >= 0 && searchCurrentIndex < this.searchState.matches.length) {
+        this.searchState.currentIndex = searchCurrentIndex;
+        this.updateSearchCount();
+      }
+    }
+
     this.updateStatus();
   }
 

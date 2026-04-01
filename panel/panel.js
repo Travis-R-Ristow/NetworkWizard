@@ -2532,6 +2532,20 @@ class NetworkWizardPanel {
     }
 
     emptyState.style.display = 'none';
+
+    const expandedCallInFiltered = this.expandedCall && filtered.some(([key]) => key === this.expandedCall);
+    let preservedDetailRow = null;
+    let preservedCallKey = null;
+
+    if (expandedCallInFiltered) {
+      const existingDetailRow = networkBody.querySelector('tr.call-details');
+      if (existingDetailRow) {
+        preservedDetailRow = existingDetailRow;
+        preservedCallKey = this.expandedCall;
+        existingDetailRow.remove();
+      }
+    }
+
     const rows = [];
 
     filtered.forEach(([key, call]) => {
@@ -2583,11 +2597,23 @@ class NetworkWizardPanel {
       `);
 
       if (isExpanded && !isPending) {
-        rows.push(`<tr class="call-details visible"><td colspan="5">${this.renderCallDetails(call, key)}</td></tr>`);
+        if (preservedDetailRow && preservedCallKey === key) {
+          rows.push(`<tr class="call-details visible" data-preserved="true"><td colspan="5"></td></tr>`);
+        } else {
+          rows.push(`<tr class="call-details visible"><td colspan="5">${this.renderCallDetails(call, key)}</td></tr>`);
+        }
       }
     });
 
     networkBody.innerHTML = rows.join('');
+
+    if (preservedDetailRow && preservedCallKey === this.expandedCall) {
+      const placeholder = networkBody.querySelector('tr.call-details[data-preserved="true"]');
+      if (placeholder) {
+        placeholder.replaceWith(preservedDetailRow);
+      }
+    }
+
     this.initNetworkJsonEditors();
   }
 
@@ -2626,7 +2652,7 @@ class NetworkWizardPanel {
       if (existingEditor) {
         if (existingEditor.container.isConnected) {
           if (existingEditor.getValue() !== value && value) {
-            existingEditor.setValue(value);
+            existingEditor.updateValue(value);
           }
           return;
         }
