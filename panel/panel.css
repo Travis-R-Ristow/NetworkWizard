@@ -1604,25 +1604,7 @@ body {
   font-style: italic;
 }
 
-.json-editor-container {
-  min-height: 250px;
-}
-
-.json-editor-container .json-editor {
-  height: 100%;
-}
-
-.json-editor-container .json-editor-content {
-  min-height: 200px;
-  max-height: 70vh;
-}
-
 .details-panel .json-editor-container {
-  min-height: 150px;
-}
-
-.details-panel .json-editor-container .json-editor-content {
-  min-height: 120px;
   max-height: 50vh;
 }
 

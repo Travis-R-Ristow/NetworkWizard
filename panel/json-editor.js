@@ -53,6 +53,7 @@ class JsonEditor {
         <textarea class="json-editor-text-view hidden" placeholder="${this.options.placeholder}"></textarea>
       </div>
       <div class="json-editor-status"></div>
+      <div class="json-editor-resize-handle"></div>
     `;
 
     this.elements = {
@@ -62,7 +63,8 @@ class JsonEditor {
       searchCount: this.container.querySelector('.json-editor-search-count'),
       treeView: this.container.querySelector('.json-editor-tree-view'),
       textView: this.container.querySelector('.json-editor-text-view'),
-      status: this.container.querySelector('.json-editor-status')
+      status: this.container.querySelector('.json-editor-status'),
+      resizeHandle: this.container.querySelector('.json-editor-resize-handle')
     };
 
     if (this.options.readOnly) {
@@ -93,6 +95,41 @@ class JsonEditor {
       if (!e.target.closest('.json-value') && !e.target.closest('.json-inline-edit')) {
         this.container.focus();
       }
+    });
+
+    this.bindResize();
+  }
+
+  bindResize() {
+    const handle = this.elements.resizeHandle;
+    let startY = 0;
+    let startHeight = 0;
+
+    const onMouseMove = (e) => {
+      const delta = e.clientY - startY;
+      const newHeight = Math.max(100, startHeight + delta) + "px";
+      this.container.style.maxHeight = newHeight;
+      this.container.style.height = newHeight;
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      this.container.classList.remove("resizing");
+    };
+
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      startY = e.clientY;
+      startHeight = this.container.offsetHeight;
+      this.container.classList.add("resizing");
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    });
+
+    handle.addEventListener("dblclick", () => {
+      this.container.style.maxHeight = "";
+      this.container.style.height = "";
     });
   }
 
@@ -332,6 +369,7 @@ class JsonEditor {
       this.elements.treeView.classList.add('hidden');
       this.elements.textView.classList.remove('hidden');
       this.elements.textView.value = this.value;
+      this.formatJson();
       if (this.searchState.query) {
         this.highlightTextMatches();
       }
@@ -351,6 +389,7 @@ class JsonEditor {
       this.renderTree();
     } else {
       this.elements.textView.value = this.value;
+      this.autoSizeTextView();
     }
 
     this.updateStatus();
@@ -376,6 +415,7 @@ class JsonEditor {
       this.elements.treeView.scrollTop = scrollTop;
     } else {
       this.elements.textView.value = this.value;
+      this.autoSizeTextView();
     }
 
     if (searchQuery) {
@@ -662,9 +702,12 @@ class JsonEditor {
       return;
     }
 
-    this.elements.textView.focus();
-    this.elements.textView.setSelectionRange(position, position + this.searchState.query.length);
-    
+    const searchHasFocus = document.activeElement === this.elements.searchInput;
+    if (!searchHasFocus) {
+      this.elements.textView.focus();
+      this.elements.textView.setSelectionRange(position, position + this.searchState.query.length);
+    }
+
     const lineHeight = parseInt(getComputedStyle(this.elements.textView).lineHeight) || 18;
     const textBeforeMatch = this.elements.textView.value.substring(0, position);
     const lineNumber = textBeforeMatch.split('\n').length;
@@ -705,14 +748,21 @@ class JsonEditor {
     }
 
     this.value = JSON.stringify(this.parsedJson, null, 2);
-    
+
     if (this.mode === 'text') {
       this.elements.textView.value = this.value;
+      this.autoSizeTextView();
     }
-    
+
     if (this.options.onChange) {
       this.options.onChange(this.value);
     }
+  }
+
+  autoSizeTextView() {
+    const tv = this.elements.textView;
+    tv.style.height = 'auto';
+    tv.style.height = tv.scrollHeight + 'px';
   }
 
   updateStatus() {

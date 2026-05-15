@@ -133,24 +133,19 @@
 }
 
 .json-editor-content {
-  flex: 1;
-  min-height: 150px;
-  max-height: 70vh;
-  overflow: hidden;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
   position: relative;
-  display: flex;
-  flex-direction: column;
 }
 
 .json-editor-tree-view {
-  flex: 1;
   overflow: auto;
   padding: var(--space-sm);
   line-height: 1.6;
 }
 
 .json-editor-text-view {
-  flex: 1;
   width: 100%;
   padding: var(--space-sm);
   background: transparent;
@@ -184,6 +179,34 @@
 
 .json-editor-status.error {
   color: var(--color-error);
+}
+
+.json-editor-resize-handle {
+  height: 12px;
+  cursor: ns-resize;
+  background: var(--color-bg-elevated);
+  border-top: 1px solid var(--color-border);
+  transition: background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  font-size: 10px;
+  letter-spacing: 2px;
+}
+
+.json-editor-resize-handle::after {
+  content: "⬍";
+}
+
+.json-editor-resize-handle:hover,
+.json-editor.resizing .json-editor-resize-handle {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.json-editor.resizing {
+  user-select: none;
 }
 
 .json-editor-empty,

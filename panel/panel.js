@@ -169,33 +169,33 @@ class NetworkWizardPanel {
 
         let needsMigration = false;
         if (allEntries.length > 0) {
-          this.attachDebugger()
-            .then(() => {
-              allEntries.forEach((o) => {
-                let key = o.key;
-                if (this.isOldKeyFormat(key)) {
-                  key = this.migrateOldKey(key);
-                  needsMigration = true;
-                }
-                if (o.responseBodyOverrideEnabled === undefined) {
-                  o.responseBodyOverrideEnabled = true;
-                  needsMigration = true;
-                }
-                if (o.requestBodyOverrideEnabled === undefined) {
-                  o.requestBodyOverrideEnabled = false;
-                }
-                this.overrides.set(key, { ...o, key: key });
-              });
-              if (needsMigration) {
-                this.saveOverrides();
-              }
-              this.renderOverridesList();
-              this.addEvent(
-                "info",
-                `Restored ${allEntries.length} override(s)`,
-              );
-            })
-            .catch(() => {});
+          allEntries.forEach((o) => {
+            let key = o.key;
+            if (this.isOldKeyFormat(key)) {
+              key = this.migrateOldKey(key);
+              needsMigration = true;
+            }
+            if (o.responseBodyOverrideEnabled === undefined) {
+              o.responseBodyOverrideEnabled = true;
+              needsMigration = true;
+            }
+            if (o.requestBodyOverrideEnabled === undefined) {
+              o.requestBodyOverrideEnabled = false;
+            }
+            this.overrides.set(key, { ...o, key: key });
+          });
+          if (needsMigration) {
+            this.saveOverrides();
+          }
+          this.renderOverridesList();
+          this.addEvent(
+            "info",
+            `Restored ${allEntries.length} override(s)`,
+          );
+          const hasEnabled = allEntries.some((o) => o.enabled !== false);
+          if (hasEnabled) {
+            this.attachDebugger().catch(() => {});
+          }
         }
       });
     });
@@ -253,23 +253,23 @@ class NetworkWizardPanel {
 
         let needsMigration = false;
         if (allEntries.length > 0) {
-          this.attachDebugger()
-            .then(() => {
-              allEntries.forEach((d) => {
-                let key = d.key;
-                if (this.isOldKeyFormat(key)) {
-                  key = this.migrateOldKey(key);
-                  needsMigration = true;
-                }
-                this.delays.set(key, { ...d, key: key });
-              });
-              if (needsMigration) {
-                this.saveDelays();
-              }
-              this.renderDelaysList();
-              this.addEvent("info", `Restored ${allEntries.length} delay(s)`);
-            })
-            .catch(() => {});
+          allEntries.forEach((d) => {
+            let key = d.key;
+            if (this.isOldKeyFormat(key)) {
+              key = this.migrateOldKey(key);
+              needsMigration = true;
+            }
+            this.delays.set(key, { ...d, key: key });
+          });
+          if (needsMigration) {
+            this.saveDelays();
+          }
+          this.renderDelaysList();
+          this.addEvent("info", `Restored ${allEntries.length} delay(s)`);
+          const hasEnabled = allEntries.some((d) => d.enabled !== false);
+          if (hasEnabled) {
+            this.attachDebugger().catch(() => {});
+          }
         }
       });
     });
@@ -391,7 +391,7 @@ class NetworkWizardPanel {
       pending: true,
     });
 
-    this.renderCalls();
+    this.appendCallRow(callKey);
   }
 
   completePendingRequest(requestId, statusCode) {
@@ -405,7 +405,7 @@ class NetworkWizardPanel {
       call.status = statusCode;
       call.hasError = statusCode >= 400;
       call.pending = false;
-      this.renderCalls();
+      this.updateCallRow(callKey);
     }
 
     this.pendingRequests.delete(requestId);
@@ -425,7 +425,7 @@ class NetworkWizardPanel {
     }
 
     this.pendingRequests.delete(requestId);
-    this.renderCalls();
+    this.updateCallRow(callKey);
   }
 
   bindEvents() {
@@ -1785,36 +1785,42 @@ class NetworkWizardPanel {
     this.elements.methodFilter.innerHTML = html;
   }
 
+  matchesFilter(call) {
+    if (this.filters.type !== "all" && call.type !== this.filters.type) {
+      return false;
+    }
+    if (this.filters.methods.size > 0) {
+      if (this.filters.methods.has("NOT_OPTIONS")) {
+        if (call.method === "OPTIONS") {
+          return false;
+        }
+      } else if (!this.filters.methods.has(call.method)) {
+        return false;
+      }
+    }
+    if (this.filters.status === "success" && call.hasError) {
+      return false;
+    }
+    if (this.filters.status === "error" && !call.hasError) {
+      return false;
+    }
+    if (this.filters.search) {
+      const searchLower = this.filters.search.toLowerCase();
+      const matchesName = call.callName.toLowerCase().includes(searchLower);
+      const matchesUrl = call.fullUrl?.toLowerCase().includes(searchLower);
+      if (!matchesName && !matchesUrl) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   getFilteredCalls() {
     const filtered = [];
     this.calls.forEach((call, key) => {
-      if (this.filters.type !== "all" && call.type !== this.filters.type) {
-        return;
+      if (this.matchesFilter(call)) {
+        filtered.push([key, call]);
       }
-      if (this.filters.methods.size > 0) {
-        if (this.filters.methods.has("NOT_OPTIONS")) {
-          if (call.method === "OPTIONS") {
-            return;
-          }
-        } else if (!this.filters.methods.has(call.method)) {
-          return;
-        }
-      }
-      if (this.filters.status === "success" && call.hasError) {
-        return;
-      }
-      if (this.filters.status === "error" && !call.hasError) {
-        return;
-      }
-      if (this.filters.search) {
-        const searchLower = this.filters.search.toLowerCase();
-        const matchesName = call.callName.toLowerCase().includes(searchLower);
-        const matchesUrl = call.fullUrl?.toLowerCase().includes(searchLower);
-        if (!matchesName && !matchesUrl) {
-          return;
-        }
-      }
-      filtered.push([key, call]);
     });
     return filtered;
   }
@@ -1906,14 +1912,14 @@ class NetworkWizardPanel {
         callData.responseBody = body;
         this.checkGqlErrors(callData, body);
         this.calls.set(callKey, callData);
-        this.renderCalls();
+        this.updateCallRow(callKey);
       });
     } else {
       this.calls.set(callKey, callData);
       if (this.expandedCall === callKey) {
         this.fetchResponseBody(callKey);
       }
-      this.renderCalls();
+      this.updateCallRow(callKey);
     }
   }
 
@@ -2156,13 +2162,13 @@ class NetworkWizardPanel {
 
     if (!call.entry) {
       call.responseBody = null;
-      this.renderCalls();
+      this.updateEditorValue(callKey, "responseBodyView", "");
       return;
     }
 
     call.entry.getContent((body) => {
       call.responseBody = body;
-      this.renderCalls();
+      this.updateEditorValue(callKey, "responseBodyView", body || "");
     });
   }
 
@@ -2208,10 +2214,33 @@ class NetworkWizardPanel {
       .join("");
   }
 
+  initDebuggerListeners() {
+    if (this.debuggerEventHandler) {
+      return;
+    }
+
+    this.debuggerEventHandler = (source, method, params) => {
+      if (source.tabId !== this.tabId || method !== "Fetch.requestPaused") {
+        return;
+      }
+      this.handlePausedRequest(params);
+    };
+
+    this.debuggerDetachHandler = (source, reason) => {
+      if (source.tabId === this.tabId) {
+        this.debuggerAttached = false;
+        this.addEvent("warning", "Debugger detached: " + reason);
+        this.renderCalls();
+      }
+    };
+  }
+
   attachDebugger() {
     if (this.debuggerAttached) {
       return Promise.resolve();
     }
+
+    this.initDebuggerListeners();
 
     return new Promise((resolve, reject) => {
       chrome.debugger.attach({ tabId: this.tabId }, "1.3", () => {
@@ -2245,23 +2274,8 @@ class NetworkWizardPanel {
           },
         );
 
-        chrome.debugger.onEvent.addListener((source, method, params) => {
-          if (source.tabId !== this.tabId || method !== "Fetch.requestPaused") {
-            return;
-          }
-          this.handlePausedRequest(params);
-        });
-
-        chrome.debugger.onDetach.addListener((source, reason) => {
-          if (source.tabId === this.tabId) {
-            this.debuggerAttached = false;
-            this.blockedCalls.clear();
-            this.overrides.clear();
-            this.delays.clear();
-            this.addEvent("warning", "Debugger detached: " + reason);
-            this.renderCalls();
-          }
-        });
+        chrome.debugger.onEvent.addListener(this.debuggerEventHandler);
+        chrome.debugger.onDetach.addListener(this.debuggerDetachHandler);
       });
     });
   }
@@ -2774,6 +2788,7 @@ class NetworkWizardPanel {
       "info",
       `Override ${override.enabled ? "enabled" : "disabled"}: ${override.callName}`,
     );
+    this.checkDebuggerNeeded();
   }
 
   setOverrideScope(key, scope) {
@@ -2880,10 +2895,10 @@ class NetworkWizardPanel {
     this.addEvent("info", `Permanently deleted override: ${override.callName}`);
 
     const activeOverrides = Array.from(this.overrides.values()).filter(
-      (o) => !o.deleted,
+      (o) => !o.deleted && o.enabled,
     );
     const activeDelays = Array.from(this.delays.values()).filter(
-      (d) => !d.deleted,
+      (d) => !d.deleted && d.enabled,
     );
     if (
       this.blockedCalls.size === 0 &&
@@ -3115,6 +3130,7 @@ class NetworkWizardPanel {
       "info",
       `Delay ${delay.enabled ? "enabled" : "disabled"}: ${delay.callName}`,
     );
+    this.checkDebuggerNeeded();
   }
 
   setDelayTiming(key, delayBefore) {
@@ -3232,10 +3248,10 @@ class NetworkWizardPanel {
     this.addEvent("info", `Permanently deleted delay: ${delay.callName}`);
 
     const activeOverrides = Array.from(this.overrides.values()).filter(
-      (o) => !o.deleted,
+      (o) => !o.deleted && o.enabled,
     );
     const activeDelays = Array.from(this.delays.values()).filter(
-      (d) => !d.deleted,
+      (d) => !d.deleted && d.enabled,
     );
     if (
       this.blockedCalls.size === 0 &&
@@ -3255,8 +3271,33 @@ class NetworkWizardPanel {
     this.saveOverrides();
   }
 
+  checkDebuggerNeeded() {
+    const activeOverrides = Array.from(this.overrides.values()).filter(
+      (o) => !o.deleted && o.enabled,
+    );
+    const activeDelays = Array.from(this.delays.values()).filter(
+      (d) => !d.deleted && d.enabled,
+    );
+    const needed =
+      this.blockedCalls.size > 0 ||
+      activeOverrides.length > 0 ||
+      activeDelays.length > 0;
+
+    if (needed && !this.debuggerAttached) {
+      this.attachDebugger();
+    } else if (!needed && this.debuggerAttached) {
+      this.detachDebugger();
+    }
+  }
+
   detachDebugger() {
     if (this.debuggerAttached) {
+      if (this.debuggerEventHandler) {
+        chrome.debugger.onEvent.removeListener(this.debuggerEventHandler);
+      }
+      if (this.debuggerDetachHandler) {
+        chrome.debugger.onDetach.removeListener(this.debuggerDetachHandler);
+      }
       chrome.debugger.detach({ tabId: this.tabId });
       this.debuggerAttached = false;
       this.addEvent("info", "Debugger detached");
@@ -3507,8 +3548,84 @@ class NetworkWizardPanel {
     return baseKey.replace(/^(gql:|rest:)/, "");
   }
 
+  appendCallRow(key) {
+    const call = this.calls.get(key);
+    if (!call || !this.matchesFilter(call)) {
+      this.refreshCallCount();
+      return;
+    }
+
+    this.elements.emptyState.style.display = "none";
+    this.elements.networkBody.insertAdjacentHTML(
+      "beforeend",
+      this.renderCallRow(key, call),
+    );
+    this.refreshCallCount();
+  }
+
+  updateCallRow(key) {
+    const call = this.calls.get(key);
+    const existingRow = this.elements.networkBody.querySelector(
+      `tr.call-row[data-call-key="${CSS.escape(key)}"]`,
+    );
+
+    if (!existingRow) {
+      if (call && this.matchesFilter(call)) {
+        this.appendCallRow(key);
+      }
+      return;
+    }
+
+    if (!call || !this.matchesFilter(call)) {
+      const detailRow = existingRow.nextElementSibling;
+      if (detailRow && detailRow.classList.contains("call-details")) {
+        this.cleanupDetailRowEditors(key);
+        detailRow.remove();
+      }
+      existingRow.remove();
+      if (this.expandedCall === key) {
+        this.expandedCall = null;
+      }
+      if (this.elements.networkBody.children.length === 0) {
+        this.elements.emptyState.style.display = "flex";
+      }
+      this.refreshCallCount();
+      return;
+    }
+
+    const template = document.createElement("template");
+    template.innerHTML = this.renderCallRow(key, call).trim();
+    existingRow.replaceWith(template.content.firstChild);
+    this.refreshCallCount();
+  }
+
+  cleanupDetailRowEditors(callKey) {
+    const fields = ["requestBody", "responseBodyView", "requestBodyOverride"];
+    fields.forEach((field) => {
+      const editorKey = `${callKey}-${field}`;
+      const editor = this.jsonEditors.get(editorKey);
+      if (editor) {
+        editor.destroy();
+        this.jsonEditors.delete(editorKey);
+      }
+    });
+  }
+
+  refreshCallCount() {
+    const filtered = this.getFilteredCalls();
+    this.updateCallCount(filtered.length, this.calls.size);
+  }
+
+  updateEditorValue(callKey, field, value) {
+    const editorKey = `${callKey}-${field}`;
+    const editor = this.jsonEditors.get(editorKey);
+    if (editor) {
+      editor.updateValue(value);
+    }
+  }
+
   renderCalls() {
-    const { networkBody, emptyState, callCount } = this.elements;
+    const { networkBody, emptyState } = this.elements;
     const filtered = this.getFilteredCalls();
     const total = this.calls.size;
 
@@ -3526,6 +3643,9 @@ class NetworkWizardPanel {
       this.expandedCall && filtered.some(([key]) => key === this.expandedCall);
     let preservedDetailRow = null;
     let preservedCallKey = null;
+    let focusedElement = null;
+    let focusSelectionStart = null;
+    let focusSelectionEnd = null;
 
     if (expandedCallInFiltered) {
       const existingDetailRow = networkBody.querySelector("tr.call-details");
@@ -3535,6 +3655,14 @@ class NetworkWizardPanel {
         if (existingRowKey === this.expandedCall) {
           preservedDetailRow = existingDetailRow;
           preservedCallKey = existingRowKey;
+          const activeEl = document.activeElement;
+          if (activeEl && existingDetailRow.contains(activeEl)) {
+            focusedElement = activeEl;
+            if (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA") {
+              focusSelectionStart = activeEl.selectionStart;
+              focusSelectionEnd = activeEl.selectionEnd;
+            }
+          }
         }
         existingDetailRow.remove();
       }
@@ -3543,67 +3671,10 @@ class NetworkWizardPanel {
     const rows = [];
 
     filtered.forEach(([key, call]) => {
+      rows.push(this.renderCallRow(key, call));
+
       const isExpanded = this.expandedCall === key;
-      const isPending = call.pending;
-      const baseKey = this.getBaseKey(key);
-      const wildcardKey = baseKey + ":*";
-      const isBlocked = this.isBlockedForCurrentSite(key, wildcardKey);
-      const override = this.getOverrideForCurrentSite(key, wildcardKey);
-      const hasOverride = override !== null;
-      const overrideEnabled = hasOverride && override.enabled;
-      const delay = this.getDelayForCurrentSite(key, wildcardKey);
-      const hasDelay = delay !== null;
-      const delayEnabled = hasDelay && delay.enabled;
-      const badgeClass = call.type === "GQL" ? "badge-gql" : "badge-rest";
-      const statusClass = isPending
-        ? "text-muted"
-        : call.hasError
-          ? "text-error"
-          : "text-success";
-      const rowClass = `call-row${isExpanded ? " expanded" : ""}${isPending ? " pending" : ""}${isBlocked ? " blocked" : ""}${overrideEnabled ? " overridden" : ""}${delayEnabled ? " delayed" : ""}`;
-      const blockBtnClass = isBlocked
-        ? "btn btn-sm btn-unblock"
-        : "btn btn-sm btn-danger";
-      const blockBtnText = isBlocked ? "Un-Block" : "Block";
-      const blockAction = isBlocked ? "unblock" : "block";
-      const overrideBtnClass = hasOverride
-        ? "btn btn-sm btn-override-active"
-        : "btn btn-sm btn-primary";
-      const overrideBtnText = hasOverride ? "Edit Override" : "Override";
-      const delayBtnClass = hasDelay
-        ? "btn btn-sm btn-delay-active"
-        : "btn btn-sm btn-delay";
-      const delayBtnText = hasDelay ? "Edit Delay" : "Delay";
-      let statusIndicators = "";
-      if (overrideEnabled) {
-        statusIndicators +=
-          '<span class="override-indicator" title="Override active">⚡</span>';
-      }
-      if (delayEnabled) {
-        statusIndicators += `<span class="delay-indicator" title="Delay active: ${delay.delayMs / 1000}s ${delay.delayBefore ? "before" : "after"}">⏱</span>`;
-      }
-
-      rows.push(`
-        <tr class="${rowClass}" data-call-key="${this.escapeHtml(key)}">
-          <td><span class="expand-icon">${isPending ? '<span class="spinner"></span>' : "▶"}</span> <span class="badge ${badgeClass}">${call.type}</span></td>
-          <td class="method-cell">${call.method}</td>
-          <td class="call-name" title="${this.escapeHtml(call.callName)}">${this.escapeHtml(this.truncateCallName(call.callName))}</td>
-          <td><span class="font-semibold ${statusClass}">${isPending ? "Loading..." : call.status}</span>${statusIndicators}</td>
-          <td class="actions-cell">
-            <button class="${overrideBtnClass}" data-action="override" data-key="${this.escapeHtml(key)}"${isPending ? " disabled" : ""}>${overrideBtnText}</button>
-            <button class="${delayBtnClass}" data-action="delay" data-key="${this.escapeHtml(key)}"${isPending ? " disabled" : ""}>${delayBtnText}</button>
-            <button class="${blockBtnClass}" data-action="${blockAction}" data-key="${this.escapeHtml(key)}"${isPending ? " disabled" : ""}>${blockBtnText}</button>
-            <div class="kebab-menu">
-              <button class="kebab-btn" data-key="${this.escapeHtml(key)}"${isPending ? " disabled" : ""}>⋮</button>
-              <div class="kebab-dropdown">
-                <button class="kebab-option" data-action="copy-curl" data-key="${this.escapeHtml(key)}">Copy cURL</button>
-              </div>
-            </div>
-          </td>
-        </tr>
-      `);
-
-      if (isExpanded && !isPending) {
+      if (isExpanded && !call.pending) {
         if (preservedDetailRow && preservedCallKey === key) {
           rows.push(
             `<tr class="call-details visible" data-preserved="true"><td colspan="5"></td></tr>`,
@@ -3624,6 +3695,13 @@ class NetworkWizardPanel {
       );
       if (placeholder) {
         placeholder.replaceWith(preservedDetailRow);
+      }
+    }
+
+    if (focusedElement && focusedElement.isConnected) {
+      focusedElement.focus();
+      if (focusSelectionStart !== null) {
+        focusedElement.setSelectionRange(focusSelectionStart, focusSelectionEnd);
       }
     }
 
@@ -3704,6 +3782,68 @@ class NetworkWizardPanel {
         }
       }
     });
+  }
+
+  renderCallRow(key, call) {
+    const isExpanded = this.expandedCall === key;
+    const isPending = call.pending;
+    const baseKey = this.getBaseKey(key);
+    const wildcardKey = baseKey + ":*";
+    const isBlocked = this.isBlockedForCurrentSite(key, wildcardKey);
+    const override = this.getOverrideForCurrentSite(key, wildcardKey);
+    const hasOverride = override !== null;
+    const overrideEnabled = hasOverride && override.enabled;
+    const delay = this.getDelayForCurrentSite(key, wildcardKey);
+    const hasDelay = delay !== null;
+    const delayEnabled = hasDelay && delay.enabled;
+    const badgeClass = call.type === "GQL" ? "badge-gql" : "badge-rest";
+    const statusClass = isPending
+      ? "text-muted"
+      : call.hasError
+        ? "text-error"
+        : "text-success";
+    const rowClass = `call-row${isExpanded ? " expanded" : ""}${isPending ? " pending" : ""}${isBlocked ? " blocked" : ""}${overrideEnabled ? " overridden" : ""}${delayEnabled ? " delayed" : ""}`;
+    const blockBtnClass = isBlocked
+      ? "btn btn-sm btn-unblock"
+      : "btn btn-sm btn-danger";
+    const blockBtnText = isBlocked ? "Un-Block" : "Block";
+    const blockAction = isBlocked ? "unblock" : "block";
+    const overrideBtnClass = hasOverride
+      ? "btn btn-sm btn-override-active"
+      : "btn btn-sm btn-primary";
+    const overrideBtnText = hasOverride ? "Edit Override" : "Override";
+    const delayBtnClass = hasDelay
+      ? "btn btn-sm btn-delay-active"
+      : "btn btn-sm btn-delay";
+    const delayBtnText = hasDelay ? "Edit Delay" : "Delay";
+    let statusIndicators = "";
+    if (overrideEnabled) {
+      statusIndicators +=
+        '<span class="override-indicator" title="Override active">⚡</span>';
+    }
+    if (delayEnabled) {
+      statusIndicators += `<span class="delay-indicator" title="Delay active: ${delay.delayMs / 1000}s ${delay.delayBefore ? "before" : "after"}">⏱</span>`;
+    }
+
+    return `
+      <tr class="${rowClass}" data-call-key="${this.escapeHtml(key)}">
+        <td><span class="expand-icon">${isPending ? '<span class="spinner"></span>' : "▶"}</span> <span class="badge ${badgeClass}">${call.type}</span></td>
+        <td class="method-cell">${call.method}</td>
+        <td class="call-name" title="${this.escapeHtml(call.callName)}">${this.escapeHtml(this.truncateCallName(call.callName))}</td>
+        <td><span class="font-semibold ${statusClass}">${isPending ? "Loading..." : call.status}</span>${statusIndicators}</td>
+        <td class="actions-cell">
+          <button class="${overrideBtnClass}" data-action="override" data-key="${this.escapeHtml(key)}"${isPending ? " disabled" : ""}>${overrideBtnText}</button>
+          <button class="${delayBtnClass}" data-action="delay" data-key="${this.escapeHtml(key)}"${isPending ? " disabled" : ""}>${delayBtnText}</button>
+          <button class="${blockBtnClass}" data-action="${blockAction}" data-key="${this.escapeHtml(key)}"${isPending ? " disabled" : ""}>${blockBtnText}</button>
+          <div class="kebab-menu">
+            <button class="kebab-btn" data-key="${this.escapeHtml(key)}"${isPending ? " disabled" : ""}>⋮</button>
+            <div class="kebab-dropdown">
+              <button class="kebab-option" data-action="copy-curl" data-key="${this.escapeHtml(key)}">Copy cURL</button>
+            </div>
+          </div>
+        </td>
+      </tr>
+    `;
   }
 
   renderCallDetails(call, callKey) {
