@@ -1622,6 +1622,9 @@ class NetworkWizardPanel {
               matchParamsEnabled: o.matchParamsEnabled || false,
               matchVariables: o.matchVariables || null,
               matchVariablesEnabled: o.matchVariablesEnabled || false,
+              requestBodyOverrideEnabled: o.requestBodyOverrideEnabled || false,
+              requestBody: o.requestBody || null,
+              responseBodyOverrideEnabled: o.responseBodyOverrideEnabled !== false,
               statusCode: o.statusCode || null,
               statusText: o.statusText || null,
               responseHeaders: o.responseHeaders || null,
@@ -1850,18 +1853,29 @@ class NetworkWizardPanel {
     this.addEvent("success", "Network capture started");
   }
 
+  getPostDataText(postData) {
+    if (postData?.params) {
+      const opsParam = postData.params.find((p) => p.name === "operations");
+      if (opsParam?.value) {
+        return opsParam.value;
+      }
+    }
+    return postData?.text || null;
+  }
+
   processEntry(entry) {
     const { request, response } = entry;
     const url = this.stripQueryParams(request.url);
     const isGql = url.includes("/graphql");
+    const postDataText = this.getPostDataText(request.postData);
     const gqlOperation = isGql
-      ? this.extractGqlOperation(request.postData?.text)
+      ? this.extractGqlOperation(postDataText)
       : null;
     const callName = gqlOperation || url;
 
     let variablesOrParams = null;
     if (isGql) {
-      variablesOrParams = this.extractGqlVariables(request.postData?.text);
+      variablesOrParams = this.extractGqlVariables(postDataText);
     } else {
       if (request.postData?.text) {
         variablesOrParams = request.postData.text;
@@ -3316,12 +3330,36 @@ class NetworkWizardPanel {
     return name.slice(0, 150) + "...";
   }
 
-  extractGqlOperation(postData) {
+  parseGqlBody(postData) {
     if (!postData) {
       return null;
     }
     try {
       const data = JSON.parse(postData);
+      if (data.operationName || data.query) {
+        return data;
+      }
+      if (data.operations) {
+        const ops = Array.isArray(data.operations)
+          ? data.operations[0]
+          : data.operations;
+        return JSON.parse(ops);
+      }
+      return data;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  extractGqlOperation(postData) {
+    if (!postData) {
+      return null;
+    }
+    try {
+      const data = this.parseGqlBody(postData);
+      if (!data) {
+        return null;
+      }
       if (data.operationName) {
         return data.operationName;
       }
@@ -3339,8 +3377,8 @@ class NetworkWizardPanel {
       return null;
     }
     try {
-      const data = JSON.parse(postData);
-      return data.variables || null;
+      const data = this.parseGqlBody(postData);
+      return data?.variables || null;
     } catch (e) {
       return null;
     }
@@ -3990,7 +4028,7 @@ class NetworkWizardPanel {
   escapeHtml(str) {
     const div = document.createElement("div");
     div.textContent = str;
-    return div.innerHTML;
+    return div.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   clear() {

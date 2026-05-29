@@ -1,5 +1,5 @@
 chrome.devtools.panels.create(
-  "NetworkWizard",
+  "NetworkWizard - test",
   "icons/icon16.png",
   "panel/panel.html"
 );
