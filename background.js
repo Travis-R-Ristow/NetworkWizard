@@ -1,5 +1,61 @@
+const MAX_BUFFERED_MESSAGES = 500;
+const MAX_BUFFERED_TABS = 25;
+
 const connections = new Map();
 const pendingByTab = new Map();
+
+const bufferMessage = (tabId, msg, createBuffer) => {
+  let buffer = pendingByTab.get(tabId);
+
+  if (!buffer) {
+    if (!createBuffer) {
+      return;
+    }
+    if (pendingByTab.size >= MAX_BUFFERED_TABS) {
+      pendingByTab.delete(pendingByTab.keys().next().value);
+    }
+    buffer = [];
+    pendingByTab.set(tabId, buffer);
+  }
+
+  if (buffer.length >= MAX_BUFFERED_MESSAGES) {
+    buffer.shift();
+  }
+  buffer.push(msg);
+};
+
+const dispatch = (tabId, msg, createBuffer) => {
+  const port = connections.get(tabId);
+  if (port) {
+    port.postMessage(msg);
+    return;
+  }
+  bufferMessage(tabId, msg, createBuffer);
+};
+
+const decodeRequestBody = (requestBody) => {
+  if (!requestBody) {
+    return null;
+  }
+
+  if (requestBody.raw?.length) {
+    try {
+      const decoder = new TextDecoder();
+      const chunks = requestBody.raw.map((chunk) =>
+        chunk.bytes ? decoder.decode(chunk.bytes, { stream: true }) : ''
+      );
+      return chunks.join('') + decoder.decode();
+    } catch (e) {
+      return null;
+    }
+  }
+
+  if (requestBody.formData) {
+    return JSON.stringify(requestBody.formData);
+  }
+
+  return null;
+};
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'networkwizard') {
@@ -9,24 +65,34 @@ chrome.runtime.onConnect.addListener((port) => {
   let connectedTabId = null;
 
   port.onMessage.addListener((msg) => {
-    if (msg.type === 'init' && msg.tabId) {
-      connectedTabId = msg.tabId;
-      connections.set(connectedTabId, port);
+    if (msg.type !== 'init' || !msg.tabId) {
+      return;
+    }
 
-      const buffered = pendingByTab.get(connectedTabId);
-      if (buffered) {
-        buffered.forEach((req) => port.postMessage(req));
-        pendingByTab.delete(connectedTabId);
-      }
+    connectedTabId = msg.tabId;
+    connections.set(connectedTabId, port);
+
+    const buffered = pendingByTab.get(connectedTabId);
+    if (buffered) {
+      buffered.forEach((req) => port.postMessage(req));
+      pendingByTab.delete(connectedTabId);
     }
   });
 
   port.onDisconnect.addListener(() => {
-    if (connectedTabId) {
-      connections.delete(connectedTabId);
-      pendingByTab.delete(connectedTabId);
+    if (connectedTabId === null) {
+      return;
     }
+    if (connections.get(connectedTabId) === port) {
+      connections.delete(connectedTabId);
+    }
+    pendingByTab.delete(connectedTabId);
   });
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  connections.delete(tabId);
+  pendingByTab.delete(tabId);
 });
 
 chrome.webRequest.onBeforeRequest.addListener(
@@ -40,36 +106,18 @@ chrome.webRequest.onBeforeRequest.addListener(
       return;
     }
 
-    let bodyText = null;
-    if (details.requestBody?.raw?.[0]?.bytes) {
-      try {
-        bodyText = new TextDecoder().decode(details.requestBody.raw[0].bytes);
-      } catch (e) {}
-    } else if (details.requestBody?.formData) {
-      bodyText = JSON.stringify(details.requestBody.formData);
-    }
-
-    const msg = {
-      type: 'requestStart',
-      requestId: details.requestId,
-      url: details.url,
-      method: details.method,
-      bodyText,
-      timestamp: details.timeStamp
-    };
-
-    const port = connections.get(details.tabId);
-    if (port) {
-      port.postMessage(msg);
-    } else {
-      if (!pendingByTab.has(details.tabId)) {
-        pendingByTab.set(details.tabId, []);
-      }
-      const buffer = pendingByTab.get(details.tabId);
-      if (buffer.length < 500) {
-        buffer.push(msg);
-      }
-    }
+    dispatch(
+      details.tabId,
+      {
+        type: 'requestStart',
+        requestId: details.requestId,
+        url: details.url,
+        method: details.method,
+        bodyText: decodeRequestBody(details.requestBody),
+        timestamp: details.timeStamp
+      },
+      true
+    );
   },
   { urls: ['<all_urls>'] },
   ['requestBody']
@@ -81,18 +129,15 @@ chrome.webRequest.onCompleted.addListener(
       return;
     }
 
-    const msg = {
-      type: 'requestEnd',
-      requestId: details.requestId,
-      statusCode: details.statusCode
-    };
-
-    const port = connections.get(details.tabId);
-    if (port) {
-      port.postMessage(msg);
-    } else if (pendingByTab.has(details.tabId)) {
-      pendingByTab.get(details.tabId).push(msg);
-    }
+    dispatch(
+      details.tabId,
+      {
+        type: 'requestEnd',
+        requestId: details.requestId,
+        statusCode: details.statusCode
+      },
+      false
+    );
   },
   { urls: ['<all_urls>'] }
 );
@@ -103,18 +148,15 @@ chrome.webRequest.onErrorOccurred.addListener(
       return;
     }
 
-    const msg = {
-      type: 'requestError',
-      requestId: details.requestId,
-      error: details.error
-    };
-
-    const port = connections.get(details.tabId);
-    if (port) {
-      port.postMessage(msg);
-    } else if (pendingByTab.has(details.tabId)) {
-      pendingByTab.get(details.tabId).push(msg);
-    }
+    dispatch(
+      details.tabId,
+      {
+        type: 'requestError',
+        requestId: details.requestId,
+        error: details.error
+      },
+      false
+    );
   },
   { urls: ['<all_urls>'] }
 );

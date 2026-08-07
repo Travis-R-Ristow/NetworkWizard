@@ -1,10 +1,13 @@
+const WRITE_DEBOUNCE_MS = 250;
+const MAX_TRACKED_INTERCEPTS = 500;
+
 class NetworkWizardPanel {
   constructor() {
     this.isRecording = true;
     this.calls = new Map();
     this.pendingRequests = new Map();
     this.overrides = new Map();
-    this.pendingResponseOverrides = new Map();
+    this.intercepts = new Map();
     this.delays = new Map();
     this.blockedCalls = new Map();
     this.blockedListSnapshot = new Map();
@@ -29,6 +32,12 @@ class NetworkWizardPanel {
     this.debuggerAttached = false;
     this.drawerExpanded = false;
     this.currentView = "network";
+    this.currentOrigin = null;
+    this.storeLoaded = false;
+    this.pendingWrites = new Map();
+    this.writeTimer = null;
+    this.reportedCdpErrors = new Set();
+    this.missingPostDataWarnings = new Set();
     this.elements = {
       clearBtn: document.getElementById("clearBtn"),
       recordToggle: document.getElementById("recordToggle"),
@@ -58,254 +67,253 @@ class NetworkWizardPanel {
     this.renderMethodFilter();
     this.connectToBackground();
     this.startCapture();
-    this.loadBlockedCalls();
-    this.loadOverrides();
-    this.loadDelays();
+    this.loadPersistedState();
     this.addEvent("info", "NetworkWizard initialized");
   }
 
-  loadBlockedCalls() {
-    chrome.devtools.inspectedWindow.eval("window.location.origin", (origin) => {
-      this.currentOrigin = origin;
-      chrome.storage.local.get(
-        ["blockedCalls", "blockedCallsGlobal"],
-        (result) => {
-          const allBlocked = result.blockedCalls || {};
-          const globalBlocked = result.blockedCallsGlobal || [];
-          const siteBlocked = allBlocked[origin] || [];
+  loadPersistedState() {
+    const flushed = this.flushWrites();
+    this.storeLoaded = false;
+    this.currentOrigin = null;
 
-          const allEntries = [
-            ...globalBlocked.map((b) =>
-              typeof b === "string" ? { key: b, scope: "global" } : b,
-            ),
-            ...siteBlocked.map((b) =>
-              typeof b === "string"
-                ? { key: b, scope: "site", scopeOrigin: origin }
-                : b,
-            ),
-          ];
+    flushed
+      .then(() => this.readOrigin())
+      .then((origin) => {
+        this.currentOrigin = origin;
+        return Promise.all([
+          this.loadStore("blocked", (raw, scope) =>
+            this.normalizeScopedEntry(raw, scope),
+          ),
+          this.loadStore("overrides", (raw, scope) =>
+            this.normalizeOverride(raw, scope),
+          ),
+          this.loadStore("delays", (raw, scope) =>
+            this.normalizeDelay(raw, scope),
+          ),
+        ]);
+      })
+      .then(([blocked, overrides, delays]) => {
+        this.blockedCalls = blocked.entries;
+        this.overrides = overrides.entries;
+        this.delays = delays.entries;
+        this.storeLoaded = true;
 
-          let needsMigration = false;
-          if (allEntries.length > 0) {
-            this.attachDebugger()
-              .then(() => {
-                allEntries.forEach((block) => {
-                  let key = block.key;
-                  if (this.isOldKeyFormat(key)) {
-                    key = this.migrateOldKey(key);
-                    needsMigration = true;
-                  }
-                  this.blockedCalls.set(key, {
-                    key: key,
-                    scope: block.scope || "site",
-                    scopeOrigin: block.scopeOrigin || origin,
-                  });
-                });
-                if (needsMigration) {
-                  this.saveBlockedCalls();
-                }
-                this.renderCalls();
-                this.addEvent(
-                  "info",
-                  `Restored ${allEntries.length} blocked call(s)`,
-                );
-              })
-              .catch(() => {});
-          }
+        if (blocked.migrated) {
+          this.saveBlockedCalls();
+        }
+        if (overrides.migrated) {
+          this.saveOverrides();
+        }
+        if (delays.migrated) {
+          this.saveDelays();
+        }
+
+        this.blockedListSnapshot = new Map(this.blockedCalls);
+        this.renderCalls();
+        this.renderScopedView();
+        this.checkDebuggerNeeded();
+
+        const restored = [
+          blocked.count ? `${blocked.count} blocked call(s)` : null,
+          overrides.count ? `${overrides.count} override(s)` : null,
+          delays.count ? `${delays.count} delay(s)` : null,
+        ].filter(Boolean);
+        if (restored.length > 0) {
+          this.addEvent("info", `Restored ${restored.join(", ")}`);
+        }
+      })
+      .catch(() => {
+        this.addEvent("error", "Failed to load saved state");
+      });
+  }
+
+  readOrigin() {
+    return new Promise((resolve) => {
+      chrome.devtools.inspectedWindow.eval(
+        "window.location.origin",
+        (origin, error) => {
+          const usable = !error && origin && origin !== "null";
+          resolve(usable ? origin : null);
         },
       );
     });
   }
 
   saveBlockedCalls() {
-    if (!this.currentOrigin) {
-      return;
-    }
-    chrome.storage.local.get(
-      ["blockedCalls", "blockedCallsGlobal"],
-      (result) => {
-        const allBlocked = result.blockedCalls || {};
-        const globalBlocked = [];
-        const siteBlocked = [];
-
-        this.blockedCalls.forEach((block) => {
-          if (block.scope === "global") {
-            globalBlocked.push(block);
-          } else if (block.scopeOrigin === this.currentOrigin) {
-            siteBlocked.push(block);
-          }
-        });
-
-        if (siteBlocked.length > 0) {
-          allBlocked[this.currentOrigin] = siteBlocked;
-        } else {
-          delete allBlocked[this.currentOrigin];
-        }
-
-        chrome.storage.local.set({
-          blockedCalls: allBlocked,
-          blockedCallsGlobal: globalBlocked,
-        });
-      },
-    );
+    this.saveStore("blocked", this.blockedCalls);
   }
 
-  loadOverrides() {
-    chrome.devtools.inspectedWindow.eval("window.location.origin", (origin) => {
-      this.currentOrigin = origin;
-      chrome.storage.local.get(["overrides", "overridesGlobal"], (result) => {
-        const allOverrides = result.overrides || {};
-        const globalOverrides = result.overridesGlobal || [];
-        const siteOverrides = allOverrides[origin] || [];
+  storeKeysFor(store) {
+    return {
+      blocked: { site: "blockedCalls", global: "blockedCallsGlobal" },
+      overrides: { site: "overrides", global: "overridesGlobal" },
+      delays: { site: "delays", global: "delaysGlobal" },
+    }[store];
+  }
 
-        const allEntries = [
-          ...globalOverrides.map((o) => ({ ...o, scope: "global" })),
-          ...siteOverrides.map((o) => ({
-            ...o,
-            scope: o.scope || "site",
-            scopeOrigin: o.scopeOrigin || origin,
-          })),
-        ];
+  loadStore(store, normalize) {
+    const keys = this.storeKeysFor(store);
 
-        let needsMigration = false;
-        if (allEntries.length > 0) {
-          allEntries.forEach((o) => {
-            let key = o.key;
-            if (this.isOldKeyFormat(key)) {
-              key = this.migrateOldKey(key);
-              needsMigration = true;
-            }
-            if (o.responseBodyOverrideEnabled === undefined) {
-              o.responseBodyOverrideEnabled = true;
-              needsMigration = true;
-            }
-            if (o.requestBodyOverrideEnabled === undefined) {
-              o.requestBodyOverrideEnabled = false;
-            }
-            this.overrides.set(key, { ...o, key: key });
-          });
-          if (needsMigration) {
-            this.saveOverrides();
-          }
-          this.renderOverridesList();
-          this.addEvent(
-            "info",
-            `Restored ${allEntries.length} override(s)`,
-          );
-          const hasEnabled = allEntries.some((o) => o.enabled !== false);
-          if (hasEnabled) {
-            this.attachDebugger().catch(() => {});
-          }
+    return chrome.storage.local.get([keys.site, keys.global]).then((result) => {
+      const bySite = result[keys.site] || {};
+      const globalEntries = result[keys.global] || [];
+      const siteEntries =
+        (this.currentOrigin && bySite[this.currentOrigin]) || [];
+      const target = new Map();
+      let migrated = false;
+
+      const add = (raw, scope) => {
+        const entry = normalize(raw, scope);
+        if (!entry.key || typeof entry.key !== "string") {
+          return;
+        }
+        if (this.isOldKeyFormat(entry.key)) {
+          entry.key = this.migrateOldKey(entry.key);
+          migrated = true;
+        }
+        if (entry.migrated) {
+          migrated = true;
+          delete entry.migrated;
+        }
+        target.set(entry.key, entry);
+      };
+
+      globalEntries.forEach((raw) => add(raw, "global"));
+      siteEntries.forEach((raw) => add(raw, "site"));
+
+      return { entries: target, count: target.size, migrated };
+    });
+  }
+
+  saveStore(store, source) {
+    if (!this.storeLoaded) {
+      return;
+    }
+
+    this.pendingWrites.set(store, { source, origin: this.currentOrigin });
+
+    if (this.writeTimer !== null) {
+      return;
+    }
+
+    this.writeTimer = setTimeout(() => {
+      this.writeTimer = null;
+      this.flushWrites();
+    }, WRITE_DEBOUNCE_MS);
+  }
+
+  flushWrites() {
+    if (this.writeTimer !== null) {
+      clearTimeout(this.writeTimer);
+      this.writeTimer = null;
+    }
+
+    const writes = [];
+    this.pendingWrites.forEach(({ source, origin }, store) => {
+      writes.push(this.writeStore(store, source, origin).catch(() => {}));
+    });
+    this.pendingWrites.clear();
+
+    return Promise.all(writes);
+  }
+
+  writeStore(store, source, origin) {
+    const keys = this.storeKeysFor(store);
+
+    return chrome.storage.local.get([keys.site, keys.global]).then((result) => {
+      const bySite = result[keys.site] || {};
+      const globalEntries = [];
+      const siteEntries = [];
+
+      source.forEach((entry) => {
+        if (entry.scope === "global") {
+          const { scopeOrigin, ...rest } = entry;
+          globalEntries.push({ ...rest, scope: "global" });
+          return;
+        }
+        if (!entry.scopeOrigin || entry.scopeOrigin === origin) {
+          siteEntries.push({ ...entry, scope: "site", scopeOrigin: origin });
         }
       });
+
+      const payload = { [keys.global]: globalEntries };
+
+      if (origin) {
+        if (siteEntries.length > 0) {
+          bySite[origin] = siteEntries;
+        } else {
+          delete bySite[origin];
+        }
+        payload[keys.site] = bySite;
+      }
+
+      return chrome.storage.local.set(payload);
     });
   }
 
   saveOverrides() {
-    if (!this.currentOrigin) {
-      return;
-    }
-    chrome.storage.local.get(["overrides", "overridesGlobal"], (result) => {
-      const allOverrides = result.overrides || {};
-      const globalOverrides = [];
-      const siteOverrides = [];
-
-      this.overrides.forEach((override) => {
-        if (override.scope === "global") {
-          globalOverrides.push(override);
-        } else if (
-          !override.scopeOrigin ||
-          override.scopeOrigin === this.currentOrigin
-        ) {
-          siteOverrides.push({ ...override, scopeOrigin: this.currentOrigin });
-        }
-      });
-
-      if (siteOverrides.length > 0) {
-        allOverrides[this.currentOrigin] = siteOverrides;
-      } else {
-        delete allOverrides[this.currentOrigin];
-      }
-
-      chrome.storage.local.set({
-        overrides: allOverrides,
-        overridesGlobal: globalOverrides,
-      });
-    });
-  }
-
-  loadDelays() {
-    chrome.devtools.inspectedWindow.eval("window.location.origin", (origin) => {
-      this.currentOrigin = origin;
-      chrome.storage.local.get(["delays", "delaysGlobal"], (result) => {
-        const allDelays = result.delays || {};
-        const globalDelays = result.delaysGlobal || [];
-        const siteDelays = allDelays[origin] || [];
-
-        const allEntries = [
-          ...globalDelays.map((d) => ({ ...d, scope: "global" })),
-          ...siteDelays.map((d) => ({
-            ...d,
-            scope: d.scope || "site",
-            scopeOrigin: d.scopeOrigin || origin,
-          })),
-        ];
-
-        let needsMigration = false;
-        if (allEntries.length > 0) {
-          allEntries.forEach((d) => {
-            let key = d.key;
-            if (this.isOldKeyFormat(key)) {
-              key = this.migrateOldKey(key);
-              needsMigration = true;
-            }
-            this.delays.set(key, { ...d, key: key });
-          });
-          if (needsMigration) {
-            this.saveDelays();
-          }
-          this.renderDelaysList();
-          this.addEvent("info", `Restored ${allEntries.length} delay(s)`);
-          const hasEnabled = allEntries.some((d) => d.enabled !== false);
-          if (hasEnabled) {
-            this.attachDebugger().catch(() => {});
-          }
-        }
-      });
-    });
+    this.saveStore("overrides", this.overrides);
   }
 
   saveDelays() {
-    if (!this.currentOrigin) {
-      return;
+    this.saveStore("delays", this.delays);
+  }
+
+  normalizeScopedEntry(raw, scope) {
+    const entry = typeof raw === "string" ? { key: raw } : { ...raw };
+
+    if (scope === "global") {
+      entry.scope = "global";
+      delete entry.scopeOrigin;
+    } else {
+      entry.scope = "site";
+      entry.scopeOrigin = entry.scopeOrigin || this.currentOrigin;
     }
-    chrome.storage.local.get(["delays", "delaysGlobal"], (result) => {
-      const allDelays = result.delays || {};
-      const globalDelays = [];
-      const siteDelays = [];
 
-      this.delays.forEach((delay) => {
-        if (delay.scope === "global") {
-          globalDelays.push(delay);
-        } else if (
-          !delay.scopeOrigin ||
-          delay.scopeOrigin === this.currentOrigin
-        ) {
-          siteDelays.push({ ...delay, scopeOrigin: this.currentOrigin });
-        }
-      });
+    return entry;
+  }
 
-      if (siteDelays.length > 0) {
-        allDelays[this.currentOrigin] = siteDelays;
-      } else {
-        delete allDelays[this.currentOrigin];
-      }
+  normalizeOverride(raw, scope) {
+    const entry = this.normalizeScopedEntry(raw, scope);
 
-      chrome.storage.local.set({
-        delays: allDelays,
-        delaysGlobal: globalDelays,
-      });
-    });
+    if (entry.enabled === undefined) {
+      entry.enabled = true;
+    }
+    if (entry.responseBodyOverrideEnabled === undefined) {
+      entry.responseBodyOverrideEnabled = true;
+      entry.migrated = true;
+    }
+    if (entry.requestBodyOverrideEnabled === undefined) {
+      entry.requestBodyOverrideEnabled = false;
+    }
+
+    return entry;
+  }
+
+  normalizeDelay(raw, scope) {
+    const entry = this.normalizeScopedEntry(raw, scope);
+
+    if (entry.enabled === undefined) {
+      entry.enabled = true;
+    }
+    if (typeof entry.delayMs !== "number") {
+      entry.delayMs = 15000;
+    }
+    if (entry.delayBefore === undefined) {
+      entry.delayBefore = true;
+    }
+
+    return entry;
+  }
+
+  renderScopedView() {
+    if (this.currentView === "blocked") {
+      this.renderBlockedList();
+    } else if (this.currentView === "overrides") {
+      this.renderOverridesList();
+    } else if (this.currentView === "delays") {
+      this.renderDelaysList();
+    }
   }
 
   connectToBackground() {
@@ -314,11 +322,10 @@ class NetworkWizardPanel {
       this.port.postMessage({ type: "init", tabId: this.tabId });
 
       this.port.onMessage.addListener((msg) => {
-        if (!this.isRecording) {
-          return;
-        }
-
         if (msg.type === "requestStart") {
+          if (!this.isRecording) {
+            return;
+          }
           this.addPendingRequest(msg);
         } else if (msg.type === "requestEnd") {
           this.completePendingRequest(msg.requestId, msg.statusCode);
@@ -341,23 +348,9 @@ class NetworkWizardPanel {
     const gqlOperation = isGql ? this.extractGqlOperation(msg.bodyText) : null;
     const callName = gqlOperation || url;
 
-    let variablesOrParams = null;
-    if (isGql) {
-      variablesOrParams = this.extractGqlVariables(msg.bodyText);
-    } else {
-      if (msg.bodyText) {
-        variablesOrParams = msg.bodyText;
-      } else {
-        try {
-          const urlObj = new URL(msg.url);
-          if (urlObj.search) {
-            variablesOrParams = Object.fromEntries(
-              urlObj.searchParams.entries(),
-            );
-          }
-        } catch (e) {}
-      }
-    }
+    const variablesOrParams = isGql
+      ? this.extractGqlVariables(msg.bodyText)
+      : msg.bodyText || this.parseUrlParams(msg.url);
 
     const callKey = this.generateCallKey(
       isGql,
@@ -388,6 +381,7 @@ class NetworkWizardPanel {
       requestHeaders: {},
       responseHeaders: {},
       requestBody: msg.bodyText,
+      matchParams: isGql ? variablesOrParams : this.parseUrlParams(msg.url),
       pending: true,
     });
 
@@ -466,6 +460,8 @@ class NetworkWizardPanel {
     this.elements.delaysList.addEventListener("input", (e) =>
       this.handleDelaysListInput(e),
     );
+    window.addEventListener("pagehide", () => this.flushWrites());
+    window.addEventListener("beforeunload", () => this.flushWrites());
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".kebab-menu")) {
         document
@@ -538,39 +534,28 @@ class NetworkWizardPanel {
     }
   }
 
-  filterByScope(entries, isMap = false) {
+  filterByScope(entries) {
+    const pairs = Array.from(entries);
+
     if (this.scopeFilter === "all") {
-      return entries;
+      return pairs;
     }
 
-    if (isMap) {
-      return Array.from(entries).filter(([, item]) => {
-        const scope = item.scope || "site";
-        if (this.scopeFilter === "global") {
-          return scope === "global";
-        }
-        return (
-          scope === "site" &&
-          (item.scopeOrigin === this.currentOrigin || !item.scopeOrigin)
-        );
-      });
-    }
-
-    return entries.filter((item) => {
+    return pairs.filter(([, item]) => {
       const scope = item.scope || "site";
       if (this.scopeFilter === "global") {
         return scope === "global";
       }
       return (
         scope === "site" &&
-        (item.scopeOrigin === this.currentOrigin || !item.scopeOrigin)
+        (!item.scopeOrigin || item.scopeOrigin === this.currentOrigin)
       );
     });
   }
 
   renderBlockedList() {
     const snapshot = this.blockedListSnapshot || new Map();
-    const filtered = this.filterByScope(snapshot.entries(), true);
+    const filtered = this.filterByScope(snapshot.entries());
 
     if (snapshot.size === 0) {
       this.elements.blockedList.innerHTML = "";
@@ -605,7 +590,7 @@ class NetworkWizardPanel {
               const wildcardBadge = isWildcard
                 ? '<span class="badge badge-wildcard">All Vars</span>'
                 : "";
-              const isCurrentlyBlocked = this.isBlockedForCurrentSite(key);
+              const isCurrentlyBlocked = this.blockedCalls.has(key);
               const btnClass = isCurrentlyBlocked
                 ? "btn btn-sm btn-unblock"
                 : "btn btn-sm btn-danger";
@@ -627,7 +612,7 @@ class NetworkWizardPanel {
                 </td>
                 <td class="call-name" title="${this.escapeHtml(name)}">${this.escapeHtml(this.truncateCallName(name))}</td>
                 <td>
-                  <span class="scope-badge ${scopeBadgeClass}" title="${scope === "global" ? "Applies to all sites" : block.scopeOrigin || this.currentOrigin}">${scopeLabel}</span>
+                  <span class="scope-badge ${scopeBadgeClass}" title="${this.escapeHtml(scope === "global" ? "Applies to all sites" : block.scopeOrigin || this.currentOrigin)}">${scopeLabel}</span>
                   <button class="btn btn-sm btn-secondary btn-scope-toggle" data-action="toggle-scope" data-key="${this.escapeHtml(key)}" title="Toggle scope">${scope === "global" ? "🌐→📍" : "📍→🌐"}</button>
                 </td>
                 <td>
@@ -663,13 +648,11 @@ class NetworkWizardPanel {
     }
 
     if (btn.dataset.action === "unblock" || btn.dataset.action === "block") {
-      this.toggleBlock(btn.dataset.key).then(() => {
+      this.toggleBlockEntry(btn.dataset.key).then(() => {
         this.renderBlockedList();
       });
     } else if (btn.dataset.action === "toggle-scope") {
       this.toggleBlockedScope(btn.dataset.key);
-    } else if (btn.dataset.action === "toggle-wildcard") {
-      this.toggleBlockedWildcard(btn.dataset.key);
     } else if (btn.dataset.action === "set-scope-filter") {
       this.setScopeFilter(btn.dataset.filter);
     }
@@ -696,43 +679,6 @@ class NetworkWizardPanel {
       "info",
       `Block scope changed to ${block.scope === "global" ? "All Sites" : "This Site"}`,
     );
-  }
-
-  toggleBlockedWildcard(key) {
-    const block = this.blockedCalls.get(key);
-    if (!block) {
-      return;
-    }
-
-    const isCurrentlyWildcard = this.isWildcardKey(key);
-    const baseKey = this.getBaseKey(key);
-
-    if (isCurrentlyWildcard) {
-      const matchingCalls = this.getCallsMatchingBaseKey(baseKey);
-      if (matchingCalls.length === 0) {
-        this.addEvent(
-          "warning",
-          "No captured calls to select from. Capture a call first.",
-        );
-        return;
-      }
-      this.showCallPicker(matchingCalls, (selectedKey) => {
-        this.blockedCalls.delete(key);
-        this.blockedCalls.set(selectedKey, { ...block, key: selectedKey });
-        this.blockedListSnapshot = new Map(this.blockedCalls);
-        this.saveBlockedCalls();
-        this.renderBlockedList();
-        this.addEvent("info", "Block changed to specific variables");
-      });
-    } else {
-      const newKey = baseKey + ":*";
-      this.blockedCalls.delete(key);
-      this.blockedCalls.set(newKey, { ...block, key: newKey });
-      this.blockedListSnapshot = new Map(this.blockedCalls);
-      this.saveBlockedCalls();
-      this.renderBlockedList();
-      this.addEvent("info", "Block changed to all variables");
-    }
   }
 
   renderOverridesList() {
@@ -772,7 +718,7 @@ class NetworkWizardPanel {
 
     this.elements.overridesEmptyState.style.display = "none";
 
-    const filtered = this.filterByScope(overrides, true);
+    const filtered = this.filterByScope(overrides);
     const hasFilteredResults = filtered.length > 0;
 
     const toolbarHtml = `
@@ -829,7 +775,7 @@ class NetworkWizardPanel {
         <tr class="${rowClass}" data-key="${this.escapeHtml(key)}">
           <td><span class="expand-icon">${isDeleted ? "" : "▶"}</span> <span class="badge ${badgeClass}">${override.type}</span>${wildcardBadge}</td>
           <td class="call-name" title="${this.escapeHtml(override.callName)}">${this.escapeHtml(this.truncateCallName(override.callName))}</td>
-          <td><span class="scope-badge ${scopeBadgeClass}" title="${scope === "global" ? "Applies to all sites" : override.scopeOrigin || this.currentOrigin}">${scopeLabel}</span></td>
+          <td><span class="scope-badge ${scopeBadgeClass}" title="${this.escapeHtml(scope === "global" ? "Applies to all sites" : override.scopeOrigin || this.currentOrigin)}">${scopeLabel}</span></td>
           <td class="actions-cell">${actionsHtml}</td>
         </tr>
       `;
@@ -859,7 +805,7 @@ class NetworkWizardPanel {
 
     headersScrollPositions.forEach((scrollTop, key) => {
       const row = this.elements.overridesList.querySelector(
-        `.override-row[data-key="${key}"]`,
+        `.override-row[data-key="${CSS.escape(key)}"]`,
       );
       const scrollArea = row?.nextElementSibling?.querySelector(
         ".headers-scroll-area",
@@ -871,7 +817,7 @@ class NetworkWizardPanel {
 
     matchScrollPositions.forEach((scrollTop, key) => {
       const row = this.elements.overridesList.querySelector(
-        `.override-row[data-key="${key}"]`,
+        `.override-row[data-key="${CSS.escape(key)}"]`,
       );
       const scrollArea =
         row?.nextElementSibling?.querySelector(".match-scroll-area");
@@ -1014,10 +960,10 @@ class NetworkWizardPanel {
           </div>
           <div class="scope-toggle-row">
             <div class="scope-toggle-group">
-              <button class="scope-toggle-btn${scope === "site" ? " active" : ""}" data-action="set-scope" data-scope="site" data-key="${key}">This Site Only</button>
-              <button class="scope-toggle-btn${scope === "global" ? " active" : ""}" data-action="set-scope" data-scope="global" data-key="${key}">All Sites</button>
+              <button class="scope-toggle-btn${scope === "site" ? " active" : ""}" data-action="set-scope" data-scope="site" data-key="${this.escapeHtml(key)}">This Site Only</button>
+              <button class="scope-toggle-btn${scope === "global" ? " active" : ""}" data-action="set-scope" data-scope="global" data-key="${this.escapeHtml(key)}">All Sites</button>
             </div>
-            <span class="scope-origin-label ${scope === "global" ? "hidden" : ""}" data-scope-origin="${key}">${this.escapeHtml(scopeOrigin)}</span>
+            <span class="scope-origin-label ${scope === "global" ? "hidden" : ""}" data-scope-origin="${this.escapeHtml(key)}">${this.escapeHtml(scopeOrigin)}</span>
           </div>
         </div>
 
@@ -1025,11 +971,11 @@ class NetworkWizardPanel {
           <div class="override-section-header">
             <span class="override-section-title">${matchLabel}</span>
             <label class="override-match-toggle">
-              <input type="checkbox" data-field="${matchField}-enabled" data-key="${key}" ${matchEnabled ? "checked" : ""}>
+              <input type="checkbox" data-field="${matchField}-enabled" data-key="${this.escapeHtml(key)}" ${matchEnabled ? "checked" : ""}>
               <span>Match specific ${isGql ? "variables" : "params"}</span>
             </label>
           </div>
-          <div class="override-match-content ${!matchEnabled ? "hidden" : ""}" data-match-content="${key}">
+          <div class="override-match-content ${!matchEnabled ? "hidden" : ""}" data-match-content="${this.escapeHtml(key)}">
             ${matchHtml}
           </div>
         </div>
@@ -1038,12 +984,12 @@ class NetworkWizardPanel {
           <div class="override-section-header">
             <span class="override-section-title">Override Request</span>
             <label class="override-toggle">
-              <input type="checkbox" data-field="requestBodyOverrideEnabled" data-key="${key}" ${override.requestBodyOverrideEnabled ? "checked" : ""}>
+              <input type="checkbox" data-field="requestBodyOverrideEnabled" data-key="${this.escapeHtml(key)}" ${override.requestBodyOverrideEnabled ? "checked" : ""}>
               <span>Modify outgoing request body</span>
             </label>
           </div>
-          <div class="override-request-content ${!override.requestBodyOverrideEnabled ? "hidden" : ""}" data-request-content="${key}">
-            <div class="json-editor-container" data-field="requestBody" data-key="${key}"></div>
+          <div class="override-request-content ${!override.requestBodyOverrideEnabled ? "hidden" : ""}" data-request-content="${this.escapeHtml(key)}">
+            <div class="json-editor-container" data-field="requestBody" data-key="${this.escapeHtml(key)}"></div>
           </div>
         </div>
 
@@ -1051,34 +997,34 @@ class NetworkWizardPanel {
           <div class="override-section-header">
             <span class="override-section-title">Override Response</span>
             <label class="override-toggle">
-              <input type="checkbox" data-field="responseBodyOverrideEnabled" data-key="${key}" ${override.responseBodyOverrideEnabled ? "checked" : ""}>
+              <input type="checkbox" data-field="responseBodyOverrideEnabled" data-key="${this.escapeHtml(key)}" ${override.responseBodyOverrideEnabled ? "checked" : ""}>
               <span>Return custom response</span>
             </label>
           </div>
-          <div class="override-response-content ${!override.responseBodyOverrideEnabled ? "hidden" : ""}" data-response-content="${key}">
+          <div class="override-response-content ${!override.responseBodyOverrideEnabled ? "hidden" : ""}" data-response-content="${this.escapeHtml(key)}">
             <div class="override-status-row">
               <label class="override-field">
                 <span class="override-field-label">Status Code</span>
-                <input type="number" class="override-input override-input-sm" data-field="statusCode" data-key="${key}" value="${override.statusCode || ""}" placeholder="200">
+                <input type="number" class="override-input override-input-sm" data-field="statusCode" data-key="${this.escapeHtml(key)}" value="${override.statusCode || ""}" placeholder="200">
               </label>
               <label class="override-field">
                 <span class="override-field-label">Status Text</span>
-                <input type="text" class="override-input" data-field="statusText" data-key="${key}" value="${this.escapeHtml(override.statusText || "")}" placeholder="OK">
+                <input type="text" class="override-input" data-field="statusText" data-key="${this.escapeHtml(key)}" value="${this.escapeHtml(override.statusText || "")}" placeholder="OK">
               </label>
             </div>
             <div class="override-section-subheader">
               <span>Response Body</span>
-              <button class="btn btn-sm btn-secondary" data-action="import-body" data-key="${key}">Import JSON</button>
+              <button class="btn btn-sm btn-secondary" data-action="import-body" data-key="${this.escapeHtml(key)}">Import JSON</button>
             </div>
-            <div class="json-editor-container" data-field="responseBody" data-key="${key}"></div>
+            <div class="json-editor-container" data-field="responseBody" data-key="${this.escapeHtml(key)}"></div>
             <div class="override-section-subheader">
               <span>Response Headers</span>
               <div class="override-view-toggle">
-                <button class="view-toggle-btn${headersViewMode === "keyvalue" ? " active" : ""}" data-action="set-headers-view" data-view="keyvalue" data-key="${key}">Key-Value</button>
-                <button class="view-toggle-btn${headersViewMode === "json" ? " active" : ""}" data-action="set-headers-view" data-view="json" data-key="${key}">JSON</button>
+                <button class="view-toggle-btn${headersViewMode === "keyvalue" ? " active" : ""}" data-action="set-headers-view" data-view="keyvalue" data-key="${this.escapeHtml(key)}">Key-Value</button>
+                <button class="view-toggle-btn${headersViewMode === "json" ? " active" : ""}" data-action="set-headers-view" data-view="json" data-key="${this.escapeHtml(key)}">JSON</button>
               </div>
             </div>
-            <div class="override-headers-content" data-headers-content="${key}">
+            <div class="override-headers-content" data-headers-content="${this.escapeHtml(key)}">
               ${headersHtml}
             </div>
           </div>
@@ -1095,7 +1041,7 @@ class NetworkWizardPanel {
     const entries = this.getMatchAsArray(matchObj);
     let html = '<div class="match-entries">';
 
-    html += `<div class="match-add-sticky"><button class="btn btn-sm btn-secondary" data-action="add-match" data-field="${field}" data-key="${key}">+ Add</button></div>`;
+    html += `<div class="match-add-sticky"><button class="btn btn-sm btn-secondary" data-action="add-match" data-field="${field}" data-key="${this.escapeHtml(key)}">+ Add</button></div>`;
     html += '<div class="match-scroll-area">';
 
     entries.forEach((entry, idx) => {
@@ -1103,8 +1049,8 @@ class NetworkWizardPanel {
       const isAdded = entry.added === true;
       const entryClass = `match-entry${isDeleted ? " deleted" : ""}${isAdded ? " added" : ""}`;
       const toggleBtn = isDeleted
-        ? `<button class="btn btn-sm btn-unblock" data-action="restore-match" data-field="${field}" data-idx="${idx}" data-key="${key}">Restore</button>`
-        : `<button class="btn btn-sm btn-danger" data-action="remove-match" data-field="${field}" data-idx="${idx}" data-key="${key}">×</button>`;
+        ? `<button class="btn btn-sm btn-unblock" data-action="restore-match" data-field="${field}" data-idx="${idx}" data-key="${this.escapeHtml(key)}">Restore</button>`
+        : `<button class="btn btn-sm btn-danger" data-action="remove-match" data-field="${field}" data-idx="${idx}" data-key="${this.escapeHtml(key)}">×</button>`;
       const statusIcon = isAdded
         ? '<span class="header-status-icon added" title="Added">+</span>'
         : '<span class="header-status-icon original" title="Original">●</span>';
@@ -1112,8 +1058,8 @@ class NetworkWizardPanel {
       html += `
         <div class="${entryClass}">
           ${statusIcon}
-          <input type="text" class="override-input" data-match-key="${idx}" data-field="${field}" data-key="${key}" value="${this.escapeHtml(entry.name)}" placeholder="Key"${isDeleted ? " disabled" : ""}>
-          <input type="text" class="override-input" data-match-value="${idx}" data-field="${field}" data-key="${key}" value="${this.escapeHtml(String(entry.value))}" placeholder="Value"${isDeleted ? " disabled" : ""}>
+          <input type="text" class="override-input" data-match-key="${idx}" data-field="${field}" data-key="${this.escapeHtml(key)}" value="${this.escapeHtml(entry.name)}" placeholder="Key"${isDeleted ? " disabled" : ""}>
+          <input type="text" class="override-input" data-match-value="${idx}" data-field="${field}" data-key="${this.escapeHtml(key)}" value="${this.escapeHtml(String(entry.value))}" placeholder="Value"${isDeleted ? " disabled" : ""}>
           ${toggleBtn}
         </div>
       `;
@@ -1136,7 +1082,7 @@ class NetworkWizardPanel {
 
     return `
       <div class="match-json-editor">
-        <textarea class="override-textarea auto-size" data-field="${field}-json" data-key="${key}" placeholder='{"variableName": "value"}'>${this.escapeHtml(jsonStr)}</textarea>
+        <textarea class="override-textarea auto-size" data-field="${field}-json" data-key="${this.escapeHtml(key)}" placeholder='{"variableName": "value"}'>${this.escapeHtml(jsonStr)}</textarea>
       </div>
     `;
   }
@@ -1174,13 +1120,13 @@ class NetworkWizardPanel {
         Object.keys(activeHeaders).length > 0
           ? JSON.stringify(activeHeaders, null, 2)
           : "";
-      return `<textarea class="override-textarea override-textarea-sm" data-field="responseHeaders-json" data-key="${key}" placeholder='{"Content-Type": "application/json"}'>${this.escapeHtml(jsonStr)}</textarea>`;
+      return `<textarea class="override-textarea override-textarea-sm" data-field="responseHeaders-json" data-key="${this.escapeHtml(key)}" placeholder='{"Content-Type": "application/json"}'>${this.escapeHtml(jsonStr)}</textarea>`;
     }
 
     const entries = this.getHeadersAsArray(headers);
     let html = '<div class="headers-entries">';
 
-    html += `<div class="headers-add-sticky"><button class="btn btn-sm btn-secondary" data-action="add-header" data-key="${key}">+ Add Header</button></div>`;
+    html += `<div class="headers-add-sticky"><button class="btn btn-sm btn-secondary" data-action="add-header" data-key="${this.escapeHtml(key)}">+ Add Header</button></div>`;
     html += '<div class="headers-scroll-area">';
 
     entries.forEach((header, idx) => {
@@ -1188,8 +1134,8 @@ class NetworkWizardPanel {
       const isAdded = header.added === true;
       const entryClass = `header-entry${isDeleted ? " deleted" : ""}${isAdded ? " added" : ""}`;
       const toggleBtn = isDeleted
-        ? `<button class="btn btn-sm btn-unblock" data-action="restore-header" data-idx="${idx}" data-key="${key}">Restore</button>`
-        : `<button class="btn btn-sm btn-danger" data-action="remove-header" data-idx="${idx}" data-key="${key}">×</button>`;
+        ? `<button class="btn btn-sm btn-unblock" data-action="restore-header" data-idx="${idx}" data-key="${this.escapeHtml(key)}">Restore</button>`
+        : `<button class="btn btn-sm btn-danger" data-action="remove-header" data-idx="${idx}" data-key="${this.escapeHtml(key)}">×</button>`;
       const statusIcon = isAdded
         ? '<span class="header-status-icon added" title="Added">+</span>'
         : '<span class="header-status-icon original" title="Original">●</span>';
@@ -1197,8 +1143,8 @@ class NetworkWizardPanel {
       html += `
         <div class="${entryClass}">
           ${statusIcon}
-          <input type="text" class="override-input" data-header-key="${idx}" data-key="${key}" value="${this.escapeHtml(header.name)}" placeholder="Header name"${isDeleted ? " disabled" : ""}>
-          <input type="text" class="override-input" data-header-value="${idx}" data-key="${key}" value="${this.escapeHtml(header.value)}" placeholder="Value"${isDeleted ? " disabled" : ""}>
+          <input type="text" class="override-input" data-header-key="${idx}" data-key="${this.escapeHtml(key)}" value="${this.escapeHtml(header.name)}" placeholder="Header name"${isDeleted ? " disabled" : ""}>
+          <input type="text" class="override-input" data-header-value="${idx}" data-key="${this.escapeHtml(key)}" value="${this.escapeHtml(header.value)}" placeholder="Value"${isDeleted ? " disabled" : ""}>
           ${toggleBtn}
         </div>
       `;
@@ -1227,13 +1173,6 @@ class NetworkWizardPanel {
       deleted: false,
       added: false,
     }));
-  }
-
-  headersArrayToObject(headersArray) {
-    if (!headersArray || headersArray.length === 0) {
-      return null;
-    }
-    return headersArray;
   }
 
   formatJsonString(str) {
@@ -1295,8 +1234,6 @@ class NetworkWizardPanel {
         this.setOverrideScope(key, btn.dataset.scope);
       } else if (action === "set-scope-filter") {
         this.setScopeFilter(btn.dataset.filter);
-      } else if (action === "toggle-wildcard") {
-        this.toggleOverrideWildcard(key);
       }
       return;
     }
@@ -1575,7 +1512,7 @@ class NetworkWizardPanel {
             override.responseBody = formatted;
             this.saveOverrides();
 
-            const editor = this.jsonEditors.get(key);
+            const editor = this.jsonEditors.get(`${key}-response`);
             if (editor && editor.container.isConnected) {
               editor.setValue(formatted);
             }
@@ -1611,25 +1548,36 @@ class NetworkWizardPanel {
             if (!o.key || !o.type || !o.callName) {
               return;
             }
-            this.overrides.set(o.key, {
-              key: o.key,
-              type: o.type,
-              callName: o.callName,
-              enabled: o.enabled !== false,
-              scope: o.scope || "site",
-              scopeOrigin: o.scopeOrigin || this.currentOrigin,
-              matchParams: o.matchParams || null,
-              matchParamsEnabled: o.matchParamsEnabled || false,
-              matchVariables: o.matchVariables || null,
-              matchVariablesEnabled: o.matchVariablesEnabled || false,
-              requestBodyOverrideEnabled: o.requestBodyOverrideEnabled || false,
-              requestBody: o.requestBody || null,
-              responseBodyOverrideEnabled: o.responseBodyOverrideEnabled !== false,
-              statusCode: o.statusCode || null,
-              statusText: o.statusText || null,
-              responseHeaders: o.responseHeaders || null,
-              responseBody: o.responseBody || null,
-            });
+
+            const entry = this.normalizeOverride(
+              {
+                key: o.key,
+                type: o.type,
+                callName: o.callName,
+                enabled: o.enabled !== false,
+                scopeOrigin: o.scopeOrigin,
+                matchParams: o.matchParams || null,
+                matchParamsEnabled: o.matchParamsEnabled || false,
+                matchVariables: o.matchVariables || null,
+                matchVariablesEnabled: o.matchVariablesEnabled || false,
+                requestBodyOverrideEnabled:
+                  o.requestBodyOverrideEnabled || false,
+                requestBody: o.requestBody || null,
+                responseBodyOverrideEnabled:
+                  o.responseBodyOverrideEnabled !== false,
+                statusCode: this.validStatusCode(o.statusCode),
+                statusText: o.statusText || null,
+                responseHeaders: o.responseHeaders || null,
+                responseBody: o.responseBody || null,
+              },
+              o.scope === "global" ? "global" : "site",
+            );
+
+            if (this.isOldKeyFormat(entry.key)) {
+              entry.key = this.migrateOldKey(entry.key);
+            }
+
+            this.overrides.set(entry.key, entry);
             imported++;
           });
 
@@ -1658,14 +1606,10 @@ class NetworkWizardPanel {
     if (!override) {
       return;
     }
-    const data = JSON.stringify(override, null, 2);
-    const blob = new Blob([data], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `override-${override.callName.replace(/[^a-z0-9]/gi, "_")}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    this.downloadJson(
+      `override-${String(override.callName).replace(/[^a-z0-9]/gi, "_")}.json`,
+      override,
+    );
     this.addEvent("success", "Exported override");
   }
 
@@ -1674,15 +1618,27 @@ class NetworkWizardPanel {
       this.addEvent("warning", "No overrides to export");
       return;
     }
-    const data = JSON.stringify(Array.from(this.overrides.values()), null, 2);
-    const blob = new Blob([data], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `overrides-${this.currentOrigin?.replace(/[^a-z0-9]/gi, "_") || "export"}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    this.downloadJson(
+      `overrides-${this.currentOrigin?.replace(/[^a-z0-9]/gi, "_") || "export"}.json`,
+      Array.from(this.overrides.values()),
+    );
     this.addEvent("success", `Exported ${this.overrides.size} override(s)`);
+  }
+
+  downloadJson(filename, data) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   handleFilterClick(e) {
@@ -1763,7 +1719,7 @@ class NetworkWizardPanel {
       html += Array.from(selected)
         .map(
           (m) =>
-            `<span class="filter-chip"><span class="chip-text">${m === "NOT_OPTIONS" ? "!OPTIONS" : m}</span><button class="chip-remove" data-filter="method" data-value="${m}">×</button></span>`,
+            `<span class="filter-chip"><span class="chip-text">${this.escapeHtml(m === "NOT_OPTIONS" ? "!OPTIONS" : m)}</span><button class="chip-remove" data-filter="method" data-value="${this.escapeHtml(m)}">×</button></span>`,
         )
         .join("");
     }
@@ -1779,7 +1735,7 @@ class NetworkWizardPanel {
         hasOptions
           ? `<div class="chip-add-dropdown">
         ${showNotOptions ? '<button class="chip-add-option" data-filter="method" data-value="NOT_OPTIONS">!OPTIONS</button>' : ""}
-        ${available.map((m) => `<button class="chip-add-option" data-filter="method" data-value="${m}">${m}</button>`).join("")}
+        ${available.map((m) => `<button class="chip-add-option" data-filter="method" data-value="${this.escapeHtml(m)}">${this.escapeHtml(m)}</button>`).join("")}
       </div>`
           : ""
       }
@@ -1792,12 +1748,14 @@ class NetworkWizardPanel {
     if (this.filters.type !== "all" && call.type !== this.filters.type) {
       return false;
     }
-    if (this.filters.methods.size > 0) {
-      if (this.filters.methods.has("NOT_OPTIONS")) {
-        if (call.method === "OPTIONS") {
-          return false;
-        }
-      } else if (!this.filters.methods.has(call.method)) {
+    const methods = this.filters.methods;
+    if (methods.size > 0) {
+      const excludesOptions = methods.has("NOT_OPTIONS");
+      if (excludesOptions && call.method === "OPTIONS") {
+        return false;
+      }
+      const hasIncludes = methods.size > (excludesOptions ? 1 : 0);
+      if (hasIncludes && !methods.has(call.method)) {
         return false;
       }
     }
@@ -1844,9 +1802,11 @@ class NetworkWizardPanel {
     chrome.devtools.network.onNavigated.addListener(() => {
       this.calls.clear();
       this.pendingRequests.clear();
+      this.intercepts.clear();
       this.expandedCall = null;
       this.renderCalls();
-      this.addEvent("info", "Page reloaded - cleared calls");
+      this.addEvent("info", "Page navigated - cleared calls");
+      this.loadPersistedState();
     });
 
     this.updateStatus("Recording");
@@ -1873,23 +1833,9 @@ class NetworkWizardPanel {
       : null;
     const callName = gqlOperation || url;
 
-    let variablesOrParams = null;
-    if (isGql) {
-      variablesOrParams = this.extractGqlVariables(postDataText);
-    } else {
-      if (request.postData?.text) {
-        variablesOrParams = request.postData.text;
-      } else {
-        try {
-          const urlObj = new URL(request.url);
-          if (urlObj.search) {
-            variablesOrParams = Object.fromEntries(
-              urlObj.searchParams.entries(),
-            );
-          }
-        } catch (e) {}
-      }
-    }
+    const variablesOrParams = isGql
+      ? this.extractGqlVariables(postDataText)
+      : request.postData?.text || this.parseUrlParams(request.url);
 
     const callKey = this.generateCallKey(
       isGql,
@@ -1916,6 +1862,9 @@ class NetworkWizardPanel {
       requestHeaders: this.headersToObject(request.headers),
       responseHeaders: this.headersToObject(response.headers),
       requestBody: request.postData?.text || null,
+      matchParams: isGql
+        ? variablesOrParams
+        : this.parseUrlParams(request.url),
       mimeType: response.content?.mimeType,
       entry,
       pending: false,
@@ -2052,7 +2001,7 @@ class NetworkWizardPanel {
     }
 
     const isReq = tableId.endsWith("-req");
-    const callKey = isReq ? tableId.slice(0, -4) : tableId.slice(0, -4);
+    const callKey = tableId.slice(0, -4);
     const call = this.calls.get(callKey);
     if (!call) {
       return;
@@ -2068,7 +2017,7 @@ class NetworkWizardPanel {
     }
 
     const container = this.elements.networkBody.querySelector(
-      `.details-card-body:has([data-table-id="${tableId}"])`,
+      `.details-card-body:has([data-table-id="${CSS.escape(tableId)}"])`,
     );
     if (container) {
       container.innerHTML = this.renderHeaders(headers, tableId);
@@ -2089,9 +2038,7 @@ class NetworkWizardPanel {
     } else if (type === "response") {
       content = call.responseBody || "";
     } else if (type === "requestOverride") {
-      const baseKey = this.getBaseKey(callKey);
-      const wildcardKey = baseKey + ":*";
-      const override = this.getOverrideForCurrentSite(callKey, wildcardKey);
+      const override = this.getOverrideForCurrentSite(callKey);
       if (override) {
         content = override.requestBody || "";
       }
@@ -2266,7 +2213,8 @@ class NetworkWizardPanel {
         }
 
         this.debuggerAttached = true;
-        this.addEvent("success", "Debugger attached for interception");
+        chrome.debugger.onEvent.addListener(this.debuggerEventHandler);
+        chrome.debugger.onDetach.addListener(this.debuggerDetachHandler);
 
         chrome.debugger.sendCommand(
           { tabId: this.tabId },
@@ -2281,294 +2229,269 @@ class NetworkWizardPanel {
             if (chrome.runtime.lastError) {
               const msg = chrome.runtime.lastError.message || "Unknown error";
               this.addEvent("error", "Fetch enable failed: " + msg);
+              this.detachDebugger();
               reject(new Error(msg));
               return;
             }
+            this.addEvent("success", "Debugger attached for interception");
             resolve();
           },
         );
-
-        chrome.debugger.onEvent.addListener(this.debuggerEventHandler);
-        chrome.debugger.onDetach.addListener(this.debuggerDetachHandler);
       });
     });
   }
 
-  handlePausedRequest(params) {
-    const { requestId, request, responseStatusCode } = params;
-    const isResponseStage = responseStatusCode !== undefined;
+  describeRequest(request) {
     const url = this.stripQueryParams(request.url);
-    const fullUrl = request.url;
     const isGql = url.includes("/graphql");
+    const postData = request.postData || null;
 
-    let callKey = null;
-    let wildcardKey = null;
-    let gqlVariables = null;
-    let urlParams = null;
-
-    if (isGql && request.postData) {
-      const operation = this.extractGqlOperation(request.postData);
-      if (operation) {
-        gqlVariables = this.extractGqlVariables(request.postData);
-        callKey = this.generateCallKey(true, operation, null, gqlVariables);
-        wildcardKey = this.generateWildcardKey(true, operation, null);
-      }
-    } else {
-      let variablesOrParams = null;
-      if (request.postData) {
-        variablesOrParams = request.postData;
-      } else {
-        try {
-          urlParams = Object.fromEntries(
-            new URL(fullUrl).searchParams.entries(),
-          );
-          if (Object.keys(urlParams).length === 0) {
-            urlParams = null;
-          }
-          variablesOrParams = urlParams;
-        } catch (e) {}
-      }
-      callKey = this.generateCallKey(false, null, url, variablesOrParams);
-      wildcardKey = this.generateWildcardKey(false, null, url);
+    if (!postData && request.hasPostData) {
+      this.warnMissingPostData(url);
     }
 
-    if (isResponseStage) {
-      const pendingOverride = this.pendingResponseOverrides.get(requestId);
-      if (pendingOverride) {
-        this.pendingResponseOverrides.delete(requestId);
-        this.fulfillWithOverride(requestId, pendingOverride);
-        return;
-      }
+    if (isGql) {
+      const operation = this.extractGqlOperation(postData);
+      const variables = this.extractGqlVariables(postData);
+      return {
+        isGql,
+        matchParams: variables,
+        callKey: operation
+          ? this.generateCallKey(true, operation, null, variables)
+          : null,
+      };
+    }
 
-      const delay = callKey
-        ? this.getDelayForCurrentSite(callKey, wildcardKey)
-        : null;
-      if (delay && delay.enabled && !delay.deleted && !delay.delayBefore) {
-        setTimeout(() => {
-          chrome.debugger.sendCommand(
-            { tabId: this.tabId },
-            "Fetch.continueRequest",
-            {
-              requestId,
-            },
-            () => {
-              if (chrome.runtime.lastError) {
-              }
-            },
-          );
-        }, delay.delayMs);
-        return;
-      }
+    const urlParams = this.parseUrlParams(request.url);
+    return {
+      isGql,
+      matchParams: urlParams,
+      callKey: this.generateCallKey(
+        false,
+        null,
+        url,
+        postData || urlParams,
+      ),
+    };
+  }
 
-      chrome.debugger.sendCommand(
-        { tabId: this.tabId },
-        "Fetch.continueRequest",
-        {
-          requestId,
-        },
-        () => {
-          if (chrome.runtime.lastError) {
-          }
-        },
-      );
+  warnMissingPostData(url) {
+    if (this.missingPostDataWarnings.has(url)) {
       return;
     }
-
-    if (callKey && this.isBlockedForCurrentSite(callKey, wildcardKey)) {
-      chrome.debugger.sendCommand(
-        { tabId: this.tabId },
-        "Fetch.failRequest",
-        {
-          requestId,
-          errorReason: "BlockedByClient",
-        },
-        () => {
-          if (chrome.runtime.lastError) {
-          }
-        },
-      );
-      return;
-    }
-
-    const override = callKey
-      ? this.findMatchingOverride(
-          callKey,
-          wildcardKey,
-          isGql ? gqlVariables : urlParams,
-          isGql,
-        )
-      : null;
-
-    if (override && override.enabled) {
-      const hasRequestOverride =
-        override.requestBodyOverrideEnabled && override.requestBody;
-      const hasResponseOverride =
-        override.responseBodyOverrideEnabled !== false;
-
-      if (hasRequestOverride) {
-        if (hasResponseOverride) {
-          this.pendingResponseOverrides.set(requestId, override);
-        }
-        this.continueWithModifiedBody(requestId, override.requestBody);
-        return;
-      } else if (hasResponseOverride) {
-        this.fulfillWithOverride(requestId, override);
-        return;
-      }
-    }
-
-    const delayBeforeReq = callKey
-      ? this.getDelayForCurrentSite(callKey, wildcardKey)
-      : null;
-    if (
-      delayBeforeReq &&
-      delayBeforeReq.enabled &&
-      !delayBeforeReq.deleted &&
-      delayBeforeReq.delayBefore
-    ) {
-      setTimeout(() => {
-        chrome.debugger.sendCommand(
-          { tabId: this.tabId },
-          "Fetch.continueRequest",
-          {
-            requestId,
-          },
-          () => {
-            if (chrome.runtime.lastError) {
-            }
-          },
-        );
-      }, delayBeforeReq.delayMs);
-      return;
-    }
-
-    chrome.debugger.sendCommand(
-      { tabId: this.tabId },
-      "Fetch.continueRequest",
-      {
-        requestId,
-      },
-      () => {
-        if (chrome.runtime.lastError) {
-        }
-      },
+    this.missingPostDataWarnings.add(url);
+    this.addEvent(
+      "warning",
+      `Request body too large to inspect - cannot match ${url}`,
     );
   }
 
-  getDelayForCurrentSite(callKey, wildcardKey = null) {
-    const keysToCheck = [callKey];
-    if (wildcardKey && wildcardKey !== callKey) {
-      keysToCheck.push(wildcardKey);
+  handlePausedRequest(params) {
+    const { requestId, request, responseStatusCode } = params;
+    const traceIds = [params.networkId, requestId];
+
+    if (responseStatusCode !== undefined) {
+      this.handlePausedResponse(requestId, traceIds, request);
+      return;
     }
 
-    for (const key of keysToCheck) {
-      const delay = this.delays.get(key);
-      if (!delay || delay.deleted) {
-        continue;
+    const { isGql, matchParams, callKey } = this.describeRequest(request);
+
+    if (!callKey) {
+      this.continueRequest(requestId);
+      return;
+    }
+
+    if (this.isBlockedForCurrentSite(callKey)) {
+      this.sendCdp("Fetch.failRequest", {
+        requestId,
+        errorReason: "BlockedByClient",
+      });
+      return;
+    }
+
+    const delay = this.getActiveDelay(callKey);
+    const delayBeforeMs = delay && delay.delayBefore ? delay.delayMs : 0;
+    const delaysResponse = Boolean(delay && !delay.delayBefore);
+    const override = this.findMatchingOverride(
+      callKey,
+      matchParams,
+      isGql,
+      true,
+    );
+
+    const overridesRequest =
+      override && override.requestBodyOverrideEnabled && override.requestBody;
+    const overridesResponse =
+      override && override.responseBodyOverrideEnabled !== false;
+
+    if (overridesRequest) {
+      if (overridesResponse || delaysResponse) {
+        this.rememberIntercept(traceIds, {
+          callKey,
+          responseOverride: overridesResponse ? override : null,
+        });
       }
-      if (delay.scope === "global") {
-        return delay;
+      this.continueWithModifiedBody(
+        requestId,
+        override.requestBody,
+        delayBeforeMs,
+      );
+      return;
+    }
+
+    if (overridesResponse) {
+      this.fulfillWithOverride(requestId, override, delayBeforeMs);
+      return;
+    }
+
+    if (delaysResponse) {
+      this.rememberIntercept(traceIds, { callKey, responseOverride: null });
+    }
+    this.continueRequest(requestId, delayBeforeMs);
+  }
+
+  handlePausedResponse(requestId, traceIds, request) {
+    const tracked = this.takeIntercept(traceIds);
+
+    let callKey = tracked ? tracked.callKey : null;
+    if (!callKey && this.delays.size > 0) {
+      callKey = this.describeRequest(request).callKey;
+    }
+
+    const delay = callKey ? this.getActiveDelay(callKey) : null;
+    const delayAfterMs = delay && !delay.delayBefore ? delay.delayMs : 0;
+
+    if (tracked && tracked.responseOverride) {
+      this.fulfillWithOverride(
+        requestId,
+        tracked.responseOverride,
+        delayAfterMs,
+      );
+      return;
+    }
+
+    this.continueResponse(requestId, delayAfterMs);
+  }
+
+  rememberIntercept(ids, data) {
+    const keys = Array.from(new Set(ids.filter(Boolean)));
+    const entry = { ...data, keys };
+
+    keys.forEach((id) => {
+      if (this.intercepts.size >= MAX_TRACKED_INTERCEPTS) {
+        this.intercepts.delete(this.intercepts.keys().next().value);
       }
-      if (delay.scopeOrigin === this.currentOrigin) {
-        return delay;
+      this.intercepts.set(id, entry);
+    });
+  }
+
+  takeIntercept(ids) {
+    for (const id of ids) {
+      const entry = id ? this.intercepts.get(id) : null;
+      if (entry) {
+        entry.keys.forEach((key) => this.intercepts.delete(key));
+        return entry;
       }
     }
     return null;
   }
 
-  getOverrideForCurrentSite(callKey, wildcardKey = null) {
-    const keysToCheck = [callKey];
-    if (wildcardKey && wildcardKey !== callKey) {
-      keysToCheck.push(wildcardKey);
+  isInScope(entry) {
+    if (!entry || entry.deleted) {
+      return false;
     }
-
-    for (const key of keysToCheck) {
-      const override = this.overrides.get(key);
-      if (!override || override.deleted) {
-        continue;
-      }
-      if (override.scope === "global") {
-        return override;
-      }
-      if (override.scopeOrigin === this.currentOrigin) {
-        return override;
-      }
+    if (entry.scope === "global") {
+      return true;
     }
-    return null;
+    return !entry.scopeOrigin || entry.scopeOrigin === this.currentOrigin;
   }
 
-  findMatchingOverride(callKey, wildcardKey, params, isGql) {
-    const keysToCheck = [callKey];
-    if (wildcardKey && wildcardKey !== callKey) {
-      keysToCheck.push(wildcardKey);
-    }
+  candidateEntries(source, callKey) {
+    const baseKey = this.getBaseKey(callKey);
+    const ordered = [];
+    const seen = new Set();
 
-    for (const key of keysToCheck) {
-      const override = this.overrides.get(key);
-      if (!override || override.deleted) {
-        continue;
+    [callKey, `${baseKey}:*`].forEach((key) => {
+      if (seen.has(key)) {
+        return;
       }
+      seen.add(key);
+      const entry = source.get(key);
+      if (entry) {
+        ordered.push(entry);
+      }
+    });
 
-      if (
-        override.scope !== "global" &&
-        override.scopeOrigin !== this.currentOrigin
-      ) {
+    source.forEach((entry, key) => {
+      if (seen.has(key) || this.getBaseKey(key) !== baseKey) {
+        return;
+      }
+      seen.add(key);
+      ordered.push(entry);
+    });
+
+    return ordered.filter((entry) => this.isInScope(entry));
+  }
+
+  getActiveDelay(callKey) {
+    return (
+      this.candidateEntries(this.delays, callKey).find(
+        (delay) => delay.enabled,
+      ) || null
+    );
+  }
+
+  getDelayForCurrentSite(callKey) {
+    return this.candidateEntries(this.delays, callKey)[0] || null;
+  }
+
+  attachedRule(source, callKey, appliedRule) {
+    const own = source.get(callKey);
+    if (own && !own.deleted) {
+      return own;
+    }
+    return appliedRule || own || null;
+  }
+
+  getOverrideForCurrentSite(callKey) {
+    const call = this.calls.get(callKey);
+    const isGql = callKey.startsWith("gql:");
+    return this.findMatchingOverride(
+      callKey,
+      call ? this.callMatchParams(call, isGql) : null,
+      isGql,
+    );
+  }
+
+  callMatchParams(call, isGql) {
+    if (call.matchParams !== undefined) {
+      return call.matchParams;
+    }
+    if (isGql) {
+      return this.extractGqlVariables(call.requestBody);
+    }
+    return this.parseUrlParams(call.fullUrl);
+  }
+
+  findMatchingOverride(callKey, params, isGql, enabledOnly = false) {
+    const candidates = this.candidateEntries(this.overrides, callKey);
+
+    for (const override of candidates) {
+      if (enabledOnly && !override.enabled) {
         continue;
       }
 
       const matchEnabled = isGql
         ? override.matchVariablesEnabled
         : override.matchParamsEnabled;
-      const matchCriteria = isGql
-        ? override.matchVariables
-        : override.matchParams;
 
       if (!matchEnabled) {
         return override;
       }
 
-      if (!params) {
-        continue;
-      }
-
-      let matches = true;
-
-      if (isGql) {
-        if (
-          typeof matchCriteria === "object" &&
-          !Array.isArray(matchCriteria)
-        ) {
-          const entries = Object.entries(matchCriteria);
-          if (entries.length > 0) {
-            for (const [matchKey, value] of entries) {
-              const paramsNormalized = JSON.stringify(
-                this.sortObjectKeys(params[matchKey]),
-              );
-              const valueNormalized = JSON.stringify(
-                this.sortObjectKeys(value),
-              );
-              if (paramsNormalized !== valueNormalized) {
-                matches = false;
-                break;
-              }
-            }
-          }
-        }
-      }
-
-      if (matches) {
-        const matchArray = this.getMatchAsArray(matchCriteria);
-        const activeMatches = matchArray.filter((m) => !m.deleted && m.name);
-
-        for (const match of activeMatches) {
-          if (String(params[match.name]) !== String(match.value)) {
-            matches = false;
-            break;
-          }
-        }
-      }
-
-      if (matches) {
+      const criteria = isGql ? override.matchVariables : override.matchParams;
+      if (this.matchesCriteria(criteria, params, isGql)) {
         return override;
       }
     }
@@ -2576,8 +2499,44 @@ class NetworkWizardPanel {
     return null;
   }
 
-  fulfillWithOverride(requestId, override) {
-    const responseCode = override.statusCode || 200;
+  matchesCriteria(criteria, params, isGql) {
+    if (!params) {
+      return false;
+    }
+
+    const isPlainObject =
+      criteria !== null && typeof criteria === "object" && !Array.isArray(criteria);
+    const entries =
+      isGql && isPlainObject
+        ? Object.entries(criteria)
+        : this.getMatchAsArray(criteria)
+            .filter((match) => !match.deleted && match.name)
+            .map((match) => [match.name, match.value]);
+
+    if (entries.length === 0) {
+      return true;
+    }
+
+    return entries.every(([name, value]) =>
+      this.valuesMatch(params[name], value),
+    );
+  }
+
+  valuesMatch(actual, expected) {
+    if (
+      (actual !== null && typeof actual === "object") ||
+      (expected !== null && typeof expected === "object")
+    ) {
+      return (
+        JSON.stringify(this.sortObjectKeys(actual)) ===
+        JSON.stringify(this.sortObjectKeys(expected))
+      );
+    }
+    return String(actual) === String(expected);
+  }
+
+  fulfillWithOverride(requestId, override, delayMs = 0) {
+    const responseCode = this.validStatusCode(override.statusCode) || 200;
     const responsePhrase = override.statusText || "OK";
 
     let responseHeaders = [];
@@ -2595,114 +2554,147 @@ class NetworkWizardPanel {
       responseHeaders.push({ name: "Content-Type", value: "application/json" });
     }
 
-    const body = override.responseBody || "{}";
-    const encoder = new TextEncoder();
-    const bytes = encoder.encode(body);
-    let binary = "";
-    const chunkSize = 8192;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode.apply(null, chunk);
-    }
-    const bodyBase64 = btoa(binary);
-
-    chrome.debugger.sendCommand(
-      { tabId: this.tabId },
+    this.sendCdp(
       "Fetch.fulfillRequest",
       {
         requestId,
         responseCode,
         responsePhrase,
         responseHeaders,
-        body: bodyBase64,
+        body: this.toBase64(override.responseBody || "{}"),
       },
-      () => {
-        if (chrome.runtime.lastError) {
-        }
-      },
+      delayMs,
     );
   }
 
-  continueWithModifiedBody(requestId, requestBody) {
-    const encoder = new TextEncoder();
-    const bytes = encoder.encode(requestBody || "");
-    let binary = "";
-    const chunkSize = 8192;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode.apply(null, chunk);
-    }
-    const postDataBase64 = btoa(binary);
-
-    chrome.debugger.sendCommand(
-      { tabId: this.tabId },
+  continueWithModifiedBody(requestId, requestBody, delayMs = 0) {
+    this.sendCdp(
       "Fetch.continueRequest",
       {
         requestId,
-        postData: postDataBase64,
+        postData: this.toBase64(requestBody || ""),
       },
-      () => {
-        if (chrome.runtime.lastError) {
-        }
-      },
+      delayMs,
     );
   }
 
-  isBlockedForCurrentSite(callKey, wildcardKey = null) {
-    const keysToCheck = [callKey];
-    if (wildcardKey && wildcardKey !== callKey) {
-      keysToCheck.push(wildcardKey);
+  validStatusCode(value) {
+    const parsed = parseInt(value, 10);
+    if (!Number.isInteger(parsed) || parsed < 100 || parsed > 599) {
+      return null;
+    }
+    return parsed;
+  }
+
+  toBase64(text) {
+    const bytes = new TextEncoder().encode(text);
+    const chunkSize = 8192;
+    let binary = "";
+
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
     }
 
-    for (const key of keysToCheck) {
-      const block = this.blockedCalls.get(key);
-      if (!block) {
-        continue;
-      }
-      if (block.scope === "global") {
-        return true;
-      }
-      if (block.scopeOrigin === this.currentOrigin) {
-        return true;
-      }
+    return btoa(binary);
+  }
+
+  sendCdp(command, params, delayMs = 0) {
+    const send = () => {
+      chrome.debugger.sendCommand({ tabId: this.tabId }, command, params, () => {
+        if (chrome.runtime.lastError) {
+          this.reportCdpError(command, chrome.runtime.lastError.message);
+        }
+      });
+    };
+
+    if (delayMs > 0) {
+      setTimeout(send, delayMs);
+      return;
     }
-    return false;
+    send();
+  }
+
+  reportCdpError(command, message) {
+    const signature = `${command}:${message}`;
+    if (this.reportedCdpErrors.has(signature)) {
+      return;
+    }
+    this.reportedCdpErrors.add(signature);
+    this.addEvent("error", `${command} failed: ${message}`);
+  }
+
+  continueRequest(requestId, delayMs = 0) {
+    this.sendCdp("Fetch.continueRequest", { requestId }, delayMs);
+  }
+
+  continueResponse(requestId, delayMs = 0) {
+    const send = () => {
+      chrome.debugger.sendCommand(
+        { tabId: this.tabId },
+        "Fetch.continueResponse",
+        { requestId },
+        () => {
+          if (chrome.runtime.lastError) {
+            this.continueRequest(requestId);
+          }
+        },
+      );
+    };
+
+    if (delayMs > 0) {
+      setTimeout(send, delayMs);
+      return;
+    }
+    send();
+  }
+
+  isBlockedForCurrentSite(callKey) {
+    return this.candidateEntries(this.blockedCalls, callKey).length > 0;
+  }
+
+  resolveBlockedKey(callKey) {
+    const entry = this.candidateEntries(this.blockedCalls, callKey)[0];
+    return entry ? entry.key : null;
   }
 
   toggleBlock(callKey) {
-    if (this.blockedCalls.has(callKey)) {
-      this.blockedCalls.delete(callKey);
-      this.addEvent("info", `Un-Blocked: ${callKey}`);
-      this.saveBlockedCalls();
-      const activeOverrides = Array.from(this.overrides.values()).filter(
-        (o) => !o.deleted,
-      );
-      const activeDelays = Array.from(this.delays.values()).filter(
-        (d) => !d.deleted,
-      );
-      if (
-        this.blockedCalls.size === 0 &&
-        activeOverrides.length === 0 &&
-        activeDelays.length === 0
-      ) {
-        this.detachDebugger();
-      }
-      this.renderCalls();
-      return Promise.resolve();
-    } else {
-      return this.attachDebugger()
-        .then(() => {
-          this.blockedCalls.set(callKey, {
-            key: callKey,
-            scope: "site",
-            scopeOrigin: this.currentOrigin,
-          });
-          this.addEvent("success", `Blocking: ${callKey}`);
-          this.saveBlockedCalls();
-          this.renderCalls();
-        })
-        .catch(() => {});
+    const blockedKey = this.resolveBlockedKey(callKey);
+    if (blockedKey) {
+      return this.removeBlock(blockedKey);
     }
+    return this.addBlock(callKey);
+  }
+
+  toggleBlockEntry(key) {
+    if (this.blockedCalls.has(key)) {
+      return this.removeBlock(key);
+    }
+    return this.addBlock(key, this.blockedListSnapshot.get(key));
+  }
+
+  removeBlock(key) {
+    this.blockedCalls.delete(key);
+    this.addEvent("info", `Un-Blocked: ${key}`);
+    this.saveBlockedCalls();
+    this.checkDebuggerNeeded();
+    this.renderCalls();
+    return Promise.resolve();
+  }
+
+  addBlock(key, template = null) {
+    return this.attachDebugger()
+      .then(() => {
+        this.blockedCalls.set(
+          key,
+          template
+            ? { ...template, key }
+            : { key, scope: "site", scopeOrigin: this.currentOrigin },
+        );
+        this.addEvent("success", `Blocking: ${key}`);
+        this.saveBlockedCalls();
+        this.renderCalls();
+      })
+      .catch(() => {});
   }
 
   createOrEditOverride(callKey) {
@@ -2711,83 +2703,94 @@ class NetworkWizardPanel {
       return;
     }
 
-    if (!this.overrides.has(callKey)) {
-      const isGql = callKey.startsWith("gql:");
-      let matchParams = null;
-      let matchParamsEnabled = false;
-      let matchVariables = null;
-      let matchVariablesEnabled = false;
+    const existing = this.attachedRule(
+      this.overrides,
+      callKey,
+      this.getOverrideForCurrentSite(callKey),
+    );
 
-      if (isGql && call.requestBody) {
-        try {
-          const parsed = JSON.parse(call.requestBody);
-          if (parsed.variables && Object.keys(parsed.variables).length > 0) {
-            matchVariables = parsed.variables;
-            matchVariablesEnabled = true;
-          }
-        } catch (e) {}
-      } else if (!isGql && call.fullUrl) {
-        try {
-          const urlParams = new URL(call.fullUrl).searchParams;
-          if (urlParams.toString()) {
-            matchParams = Object.entries(
-              Object.fromEntries(urlParams.entries()),
-            ).map(([name, value]) => ({
-              name,
-              value,
-              deleted: false,
-              added: false,
-            }));
-            matchParamsEnabled = true;
-          }
-        } catch (e) {}
-      }
-
-      let responseHeaders = null;
-      if (
-        call.responseHeaders &&
-        Object.keys(call.responseHeaders).length > 0
-      ) {
-        responseHeaders = Object.entries(call.responseHeaders).map(
-          ([name, value]) => ({
-            name,
-            value: String(value),
-            deleted: false,
-            added: false,
-          }),
-        );
-      }
-
-      this.overrides.set(callKey, {
-        key: callKey,
-        type: call.type,
-        callName: call.callName,
-        enabled: true,
-        scope: "site",
-        scopeOrigin: this.currentOrigin,
-        matchParams,
-        matchParamsEnabled,
-        matchVariables,
-        matchVariablesEnabled,
-        requestBodyOverrideEnabled: false,
-        requestBody: this.formatJsonString(call.requestBody),
-        responseBodyOverrideEnabled: true,
-        statusCode: call.statusCode || call.status,
-        statusText: call.statusText || "",
-        responseHeaders,
-        responseBody: this.formatJsonString(call.responseBody),
-      });
-
-      this.attachDebugger()
-        .then(() => {
-          this.saveOverrides();
-          this.addEvent("success", `Created override for: ${call.callName}`);
-        })
-        .catch(() => {});
+    if (existing) {
+      this.expandedOverride = existing.key;
+      this.switchView("overrides");
+      return;
     }
+
+    const isGql = callKey.startsWith("gql:");
+    let matchParams = null;
+    let matchParamsEnabled = false;
+    let matchVariables = null;
+    let matchVariablesEnabled = false;
+
+    if (isGql) {
+      const variables = this.extractGqlVariables(call.requestBody);
+      if (variables && Object.keys(variables).length > 0) {
+        matchVariables = variables;
+        matchVariablesEnabled = true;
+      }
+    } else {
+      const urlParams = this.parseUrlParams(call.fullUrl);
+      if (urlParams) {
+        matchParams = Object.entries(urlParams).map(([name, value]) => ({
+          name,
+          value,
+          deleted: false,
+          added: false,
+        }));
+        matchParamsEnabled = true;
+      }
+    }
+
+    let responseHeaders = null;
+    if (call.responseHeaders && Object.keys(call.responseHeaders).length > 0) {
+      responseHeaders = Object.entries(call.responseHeaders).map(
+        ([name, value]) => ({
+          name,
+          value: String(value),
+          deleted: false,
+          added: false,
+        }),
+      );
+    }
+
+    this.overrides.set(callKey, {
+      key: callKey,
+      type: call.type,
+      callName: call.callName,
+      enabled: true,
+      scope: "site",
+      scopeOrigin: this.currentOrigin,
+      matchParams,
+      matchParamsEnabled,
+      matchVariables,
+      matchVariablesEnabled,
+      requestBodyOverrideEnabled: false,
+      requestBody: this.formatJsonString(call.requestBody),
+      responseBodyOverrideEnabled: true,
+      statusCode: this.numericStatus(call),
+      statusText: call.statusText || "",
+      responseHeaders,
+      responseBody: this.formatJsonString(call.responseBody),
+    });
+
+    this.attachDebugger()
+      .then(() => {
+        this.saveOverrides();
+        this.addEvent("success", `Created override for: ${call.callName}`);
+      })
+      .catch(() => {});
 
     this.expandedOverride = callKey;
     this.switchView("overrides");
+  }
+
+  numericStatus(call) {
+    if (typeof call.status === "number") {
+      return call.status;
+    }
+    if (typeof call.statusCode === "number") {
+      return call.statusCode;
+    }
+    return null;
   }
 
   toggleOverrideEnabled(key) {
@@ -2822,49 +2825,6 @@ class NetworkWizardPanel {
       "info",
       `Override scope changed to ${scope === "global" ? "All Sites" : "This Site"}`,
     );
-  }
-
-  toggleOverrideWildcard(key) {
-    const override = this.overrides.get(key);
-    if (!override) {
-      return;
-    }
-
-    const isCurrentlyWildcard = this.isWildcardKey(key);
-    const baseKey = this.getBaseKey(key);
-
-    if (isCurrentlyWildcard) {
-      const matchingCalls = this.getCallsMatchingBaseKey(baseKey);
-      if (matchingCalls.length === 0) {
-        this.addEvent(
-          "warning",
-          "No captured calls to select from. Capture a call first.",
-        );
-        return;
-      }
-      this.showCallPicker(matchingCalls, (selectedKey) => {
-        this.overrides.delete(key);
-        this.overrides.set(selectedKey, { ...override, key: selectedKey });
-        if (this.expandedOverride === key) {
-          this.expandedOverride = selectedKey;
-        }
-        this.saveOverrides();
-        this.renderOverridesList();
-        this.renderCalls();
-        this.addEvent("info", "Override changed to specific variables");
-      });
-    } else {
-      const newKey = baseKey + ":*";
-      this.overrides.delete(key);
-      this.overrides.set(newKey, { ...override, key: newKey });
-      if (this.expandedOverride === key) {
-        this.expandedOverride = newKey;
-      }
-      this.saveOverrides();
-      this.renderOverridesList();
-      this.renderCalls();
-      this.addEvent("info", "Override changed to all variables");
-    }
   }
 
   deleteOverride(key) {
@@ -2908,19 +2868,7 @@ class NetworkWizardPanel {
     this.renderCalls();
     this.addEvent("info", `Permanently deleted override: ${override.callName}`);
 
-    const activeOverrides = Array.from(this.overrides.values()).filter(
-      (o) => !o.deleted && o.enabled,
-    );
-    const activeDelays = Array.from(this.delays.values()).filter(
-      (d) => !d.deleted && d.enabled,
-    );
-    if (
-      this.blockedCalls.size === 0 &&
-      activeOverrides.length === 0 &&
-      activeDelays.length === 0
-    ) {
-      this.detachDebugger();
-    }
+    this.checkDebuggerNeeded();
   }
 
   createOrEditDelay(callKey) {
@@ -2929,25 +2877,35 @@ class NetworkWizardPanel {
       return;
     }
 
-    if (!this.delays.has(callKey)) {
-      this.delays.set(callKey, {
-        key: callKey,
-        type: call.type,
-        callName: call.callName,
-        enabled: true,
-        scope: "site",
-        scopeOrigin: this.currentOrigin,
-        delayMs: 15000,
-        delayBefore: true,
-      });
+    const existing = this.attachedRule(
+      this.delays,
+      callKey,
+      this.getDelayForCurrentSite(callKey),
+    );
 
-      this.attachDebugger()
-        .then(() => {
-          this.saveDelays();
-          this.addEvent("success", `Created delay for: ${call.callName}`);
-        })
-        .catch(() => {});
+    if (existing) {
+      this.expandedDelay = existing.key;
+      this.switchView("delays");
+      return;
     }
+
+    this.delays.set(callKey, {
+      key: callKey,
+      type: call.type,
+      callName: call.callName,
+      enabled: true,
+      scope: "site",
+      scopeOrigin: this.currentOrigin,
+      delayMs: 15000,
+      delayBefore: true,
+    });
+
+    this.attachDebugger()
+      .then(() => {
+        this.saveDelays();
+        this.addEvent("success", `Created delay for: ${call.callName}`);
+      })
+      .catch(() => {});
 
     this.expandedDelay = callKey;
     this.switchView("delays");
@@ -2964,7 +2922,7 @@ class NetworkWizardPanel {
 
     this.elements.delaysEmptyState.style.display = "none";
 
-    const filtered = this.filterByScope(delays, true);
+    const filtered = this.filterByScope(delays);
     const hasFilteredResults = filtered.length > 0;
 
     const noResultsRow = !hasFilteredResults
@@ -3010,7 +2968,7 @@ class NetworkWizardPanel {
         <tr class="${rowClass}" data-key="${this.escapeHtml(key)}">
           <td><span class="expand-icon">${isDeleted ? "" : "▶"}</span> <span class="badge ${badgeClass}">${delay.type}</span>${wildcardBadge}</td>
           <td class="call-name" title="${this.escapeHtml(delay.callName)}">${this.escapeHtml(this.truncateCallName(delay.callName))}</td>
-          <td><span class="scope-badge ${scopeBadgeClass}" title="${scope === "global" ? "Applies to all sites" : delay.scopeOrigin || this.currentOrigin}">${scopeLabel}</span></td>
+          <td><span class="scope-badge ${scopeBadgeClass}" title="${this.escapeHtml(scope === "global" ? "Applies to all sites" : delay.scopeOrigin || this.currentOrigin)}">${scopeLabel}</span></td>
           <td>${delay.delayMs / 1000}s ${delay.delayBefore ? "before" : "after"}</td>
           <td class="actions-cell">${actionsHtml}</td>
         </tr>
@@ -3051,8 +3009,8 @@ class NetworkWizardPanel {
           <div class="delay-field">
             <span class="delay-field-label">Scope:</span>
             <div class="scope-toggle-group">
-              <button class="scope-toggle-btn${scope === "site" ? " active" : ""}" data-action="set-delay-scope" data-scope="site" data-key="${key}">This Site Only</button>
-              <button class="scope-toggle-btn${scope === "global" ? " active" : ""}" data-action="set-delay-scope" data-scope="global" data-key="${key}">All Sites</button>
+              <button class="scope-toggle-btn${scope === "site" ? " active" : ""}" data-action="set-delay-scope" data-scope="site" data-key="${this.escapeHtml(key)}">This Site Only</button>
+              <button class="scope-toggle-btn${scope === "global" ? " active" : ""}" data-action="set-delay-scope" data-scope="global" data-key="${this.escapeHtml(key)}">All Sites</button>
             </div>
             <span class="scope-origin-label ${scope === "global" ? "hidden" : ""}">${this.escapeHtml(scopeOrigin)}</span>
           </div>
@@ -3060,7 +3018,7 @@ class NetworkWizardPanel {
         <div class="delay-form-row">
           <div class="delay-field">
             <span class="delay-field-label">Delay Duration:</span>
-            <input type="number" class="delay-input" data-field="delaySeconds" data-key="${key}" value="${delay.delayMs / 1000}" min="1" max="300">
+            <input type="number" class="delay-input" data-field="delaySeconds" data-key="${this.escapeHtml(key)}" value="${delay.delayMs / 1000}" min="1" max="300">
             <span class="delay-unit">seconds</span>
           </div>
         </div>
@@ -3068,8 +3026,8 @@ class NetworkWizardPanel {
           <div class="delay-field">
             <span class="delay-field-label">Delay Timing:</span>
             <div class="delay-toggle-group">
-              <button class="delay-toggle-btn${delay.delayBefore ? " active" : ""}" data-action="set-timing" data-timing="before" data-key="${key}">Before Request</button>
-              <button class="delay-toggle-btn${!delay.delayBefore ? " active" : ""}" data-action="set-timing" data-timing="after" data-key="${key}">After Response</button>
+              <button class="delay-toggle-btn${delay.delayBefore ? " active" : ""}" data-action="set-timing" data-timing="before" data-key="${this.escapeHtml(key)}">Before Request</button>
+              <button class="delay-toggle-btn${!delay.delayBefore ? " active" : ""}" data-action="set-timing" data-timing="after" data-key="${this.escapeHtml(key)}">After Response</button>
             </div>
           </div>
         </div>
@@ -3097,8 +3055,6 @@ class NetworkWizardPanel {
         this.setDelayScope(key, btn.dataset.scope);
       } else if (action === "set-scope-filter") {
         this.setScopeFilter(btn.dataset.filter);
-      } else if (action === "toggle-wildcard") {
-        this.toggleDelayWildcard(key);
       }
       return;
     }
@@ -3177,49 +3133,6 @@ class NetworkWizardPanel {
     );
   }
 
-  toggleDelayWildcard(key) {
-    const delay = this.delays.get(key);
-    if (!delay) {
-      return;
-    }
-
-    const isCurrentlyWildcard = this.isWildcardKey(key);
-    const baseKey = this.getBaseKey(key);
-
-    if (isCurrentlyWildcard) {
-      const matchingCalls = this.getCallsMatchingBaseKey(baseKey);
-      if (matchingCalls.length === 0) {
-        this.addEvent(
-          "warning",
-          "No captured calls to select from. Capture a call first.",
-        );
-        return;
-      }
-      this.showCallPicker(matchingCalls, (selectedKey) => {
-        this.delays.delete(key);
-        this.delays.set(selectedKey, { ...delay, key: selectedKey });
-        if (this.expandedDelay === key) {
-          this.expandedDelay = selectedKey;
-        }
-        this.saveDelays();
-        this.renderDelaysList();
-        this.renderCalls();
-        this.addEvent("info", "Delay changed to specific variables");
-      });
-    } else {
-      const newKey = baseKey + ":*";
-      this.delays.delete(key);
-      this.delays.set(newKey, { ...delay, key: newKey });
-      if (this.expandedDelay === key) {
-        this.expandedDelay = newKey;
-      }
-      this.saveDelays();
-      this.renderDelaysList();
-      this.renderCalls();
-      this.addEvent("info", "Delay changed to all variables");
-    }
-  }
-
   deleteDelay(key) {
     const delay = this.delays.get(key);
     if (!delay) {
@@ -3261,28 +3174,7 @@ class NetworkWizardPanel {
     this.renderCalls();
     this.addEvent("info", `Permanently deleted delay: ${delay.callName}`);
 
-    const activeOverrides = Array.from(this.overrides.values()).filter(
-      (o) => !o.deleted && o.enabled,
-    );
-    const activeDelays = Array.from(this.delays.values()).filter(
-      (d) => !d.deleted && d.enabled,
-    );
-    if (
-      this.blockedCalls.size === 0 &&
-      activeOverrides.length === 0 &&
-      activeDelays.length === 0
-    ) {
-      this.detachDebugger();
-    }
-  }
-
-  updateOverrideField(key, field, value) {
-    const override = this.overrides.get(key);
-    if (!override) {
-      return;
-    }
-    override[field] = value;
-    this.saveOverrides();
+    this.checkDebuggerNeeded();
   }
 
   checkDebuggerNeeded() {
@@ -3298,7 +3190,7 @@ class NetworkWizardPanel {
       activeDelays.length > 0;
 
     if (needed && !this.debuggerAttached) {
-      this.attachDebugger();
+      this.attachDebugger().catch(() => {});
     } else if (!needed && this.debuggerAttached) {
       this.detachDebugger();
     }
@@ -3314,6 +3206,7 @@ class NetworkWizardPanel {
       }
       chrome.debugger.detach({ tabId: this.tabId });
       this.debuggerAttached = false;
+      this.intercepts.clear();
       this.addEvent("info", "Debugger detached");
     }
   }
@@ -3343,9 +3236,50 @@ class NetworkWizardPanel {
         const ops = Array.isArray(data.operations)
           ? data.operations[0]
           : data.operations;
-        return JSON.parse(ops);
+        return typeof ops === "string" ? JSON.parse(ops) : ops;
       }
       return data;
+    } catch (e) {
+      return this.parseMultipartGqlBody(postData);
+    }
+  }
+
+  parseMultipartGqlBody(postData) {
+    const operations = this.extractMultipartField(postData, "operations");
+    if (!operations) {
+      return null;
+    }
+    try {
+      return JSON.parse(operations);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  extractMultipartField(raw, fieldName) {
+    const marker = `name="${fieldName}"`;
+    const markerIndex = raw.indexOf(marker);
+    if (markerIndex === -1) {
+      return null;
+    }
+
+    const headerEnd = raw.indexOf("\r\n\r\n", markerIndex);
+    if (headerEnd === -1) {
+      return null;
+    }
+
+    const valueStart = headerEnd + 4;
+    const valueEnd = raw.indexOf("\r\n--", valueStart);
+    return raw.substring(valueStart, valueEnd === -1 ? undefined : valueEnd);
+  }
+
+  parseUrlParams(url) {
+    if (!url) {
+      return null;
+    }
+    try {
+      const params = Object.fromEntries(new URL(url).searchParams.entries());
+      return Object.keys(params).length > 0 ? params : null;
     } catch (e) {
       return null;
     }
@@ -3381,98 +3315,6 @@ class NetworkWizardPanel {
       return data?.variables || null;
     } catch (e) {
       return null;
-    }
-  }
-
-  getCallsMatchingBaseKey(baseKey) {
-    const matches = [];
-    this.calls.forEach((call, key) => {
-      if (this.getBaseKey(key) === baseKey) {
-        matches.push({ key, call });
-      }
-    });
-    return matches;
-  }
-
-  showCallPicker(matchingCalls, onSelect) {
-    if (matchingCalls.length === 1) {
-      onSelect(matchingCalls[0].key);
-      return;
-    }
-
-    const existingPicker = document.querySelector(".call-picker-overlay");
-    if (existingPicker) {
-      existingPicker.remove();
-    }
-
-    const overlay = document.createElement("div");
-    overlay.className = "call-picker-overlay";
-
-    const modal = document.createElement("div");
-    modal.className = "call-picker-modal";
-    modal.innerHTML = `
-      <div class="call-picker-header">
-        <span class="call-picker-title">Select a call</span>
-        <button class="call-picker-close">&times;</button>
-      </div>
-      <div class="call-picker-list">
-        ${matchingCalls
-          .map(({ key, call }) => {
-            const preview = this.getVariablesPreview(call);
-            return `<button class="call-picker-item" data-key="${this.escapeHtml(key)}">
-            <span class="call-picker-item-name">${this.escapeHtml(call.callName)}</span>
-            <span class="call-picker-item-preview">${this.escapeHtml(preview)}</span>
-          </button>`;
-          })
-          .join("")}
-      </div>
-    `;
-
-    overlay.appendChild(modal);
-    document.body.appendChild(overlay);
-
-    const closeOverlay = () => overlay.remove();
-
-    overlay.addEventListener("click", (e) => {
-      if (e.target === overlay) {
-        closeOverlay();
-      }
-    });
-
-    modal
-      .querySelector(".call-picker-close")
-      .addEventListener("click", closeOverlay);
-
-    modal.querySelectorAll(".call-picker-item").forEach((item) => {
-      item.addEventListener("click", () => {
-        onSelect(item.dataset.key);
-        closeOverlay();
-      });
-    });
-  }
-
-  getVariablesPreview(call) {
-    if (!call.requestBody) {
-      if (call.fullUrl) {
-        try {
-          const params = new URL(call.fullUrl).searchParams.toString();
-          return params ? `?${params}` : "(no params)";
-        } catch (e) {}
-      }
-      return "(no body)";
-    }
-    try {
-      const parsed = JSON.parse(call.requestBody);
-      if (parsed.variables) {
-        const str = JSON.stringify(parsed.variables);
-        return str.length > 60 ? str.substring(0, 60) + "..." : str;
-      }
-      const str = JSON.stringify(parsed);
-      return str.length > 60 ? str.substring(0, 60) + "..." : str;
-    } catch (e) {
-      return call.requestBody.length > 60
-        ? call.requestBody.substring(0, 60) + "..."
-        : call.requestBody;
     }
   }
 
@@ -3545,11 +3387,6 @@ class NetworkWizardPanel {
     }
     const hash = this.hashString(hashInput);
     return `${base}:${hash}`;
-  }
-
-  generateWildcardKey(isGql, operation, url) {
-    const base = isGql ? `gql:${operation}` : `rest:${url}`;
-    return `${base}:*`;
   }
 
   getBaseKey(callKey) {
@@ -3825,15 +3662,15 @@ class NetworkWizardPanel {
   renderCallRow(key, call) {
     const isExpanded = this.expandedCall === key;
     const isPending = call.pending;
-    const baseKey = this.getBaseKey(key);
-    const wildcardKey = baseKey + ":*";
-    const isBlocked = this.isBlockedForCurrentSite(key, wildcardKey);
-    const override = this.getOverrideForCurrentSite(key, wildcardKey);
+    const isBlocked = this.isBlockedForCurrentSite(key);
+    const appliedOverride = this.getOverrideForCurrentSite(key);
+    const appliedDelay = this.getDelayForCurrentSite(key);
+    const override = this.attachedRule(this.overrides, key, appliedOverride);
+    const delay = this.attachedRule(this.delays, key, appliedDelay);
     const hasOverride = override !== null;
-    const overrideEnabled = hasOverride && override.enabled;
-    const delay = this.getDelayForCurrentSite(key, wildcardKey);
+    const overrideEnabled = Boolean(appliedOverride && appliedOverride.enabled);
     const hasDelay = delay !== null;
-    const delayEnabled = hasDelay && delay.enabled;
+    const delayEnabled = Boolean(appliedDelay && appliedDelay.enabled);
     const badgeClass = call.type === "GQL" ? "badge-gql" : "badge-rest";
     const statusClass = isPending
       ? "text-muted"
@@ -3860,7 +3697,7 @@ class NetworkWizardPanel {
         '<span class="override-indicator" title="Override active">⚡</span>';
     }
     if (delayEnabled) {
-      statusIndicators += `<span class="delay-indicator" title="Delay active: ${delay.delayMs / 1000}s ${delay.delayBefore ? "before" : "after"}">⏱</span>`;
+      statusIndicators += `<span class="delay-indicator" title="Delay active: ${appliedDelay.delayMs / 1000}s ${appliedDelay.delayBefore ? "before" : "after"}">⏱</span>`;
     }
 
     return `
@@ -3902,9 +3739,7 @@ class NetworkWizardPanel {
 
     const statusClass = call.hasError ? "text-error" : "text-success";
 
-    const baseKey = this.getBaseKey(callKey);
-    const wildcardKey = baseKey + ":*";
-    const override = this.getOverrideForCurrentSite(callKey, wildcardKey);
+    const override = this.getOverrideForCurrentSite(callKey);
     const hasRequestOverride =
       override &&
       override.enabled &&
@@ -3917,24 +3752,24 @@ class NetworkWizardPanel {
         <div class="request-comparison-side">
           <div class="request-comparison-header">
             <span class="request-comparison-title">Original Request</span>
-            <button class="btn btn-sm btn-secondary copy-btn" data-copy="request" data-key="${callKey}">Copy</button>
+            <button class="btn btn-sm btn-secondary copy-btn" data-copy="request" data-key="${this.escapeHtml(callKey)}">Copy</button>
           </div>
-          <div class="json-editor-container" data-field="requestBody" data-callkey="${callKey}" data-readonly="true"></div>
+          <div class="json-editor-container" data-field="requestBody" data-callkey="${this.escapeHtml(callKey)}" data-readonly="true"></div>
         </div>
         <div class="request-comparison-side">
           <div class="request-comparison-header">
             <span class="request-comparison-title overridden">Overridden Request</span>
-            <button class="btn btn-sm btn-secondary copy-btn" data-copy="requestOverride" data-key="${callKey}">Copy</button>
+            <button class="btn btn-sm btn-secondary copy-btn" data-copy="requestOverride" data-key="${this.escapeHtml(callKey)}">Copy</button>
           </div>
-          <div class="json-editor-container" data-field="requestBodyOverride" data-callkey="${callKey}" data-override-key="${override.key}" data-readonly="true"></div>
+          <div class="json-editor-container" data-field="requestBodyOverride" data-callkey="${this.escapeHtml(callKey)}" data-override-key="${this.escapeHtml(override.key)}" data-readonly="true"></div>
         </div>
       </div>
     `
       : `
       <div class="panel-toolbar">
-        <button class="btn btn-sm btn-secondary copy-btn" data-copy="request" data-key="${callKey}">Copy</button>
+        <button class="btn btn-sm btn-secondary copy-btn" data-copy="request" data-key="${this.escapeHtml(callKey)}">Copy</button>
       </div>
-      <div class="json-editor-container" data-field="requestBody" data-callkey="${callKey}" data-readonly="true"></div>
+      <div class="json-editor-container" data-field="requestBody" data-callkey="${this.escapeHtml(callKey)}" data-readonly="true"></div>
     `;
 
     return `
@@ -3972,9 +3807,9 @@ class NetworkWizardPanel {
         </section>
         <section class="details-panel${this.activeTab === "response" ? " active" : ""}" data-panel="response">
           <div class="panel-toolbar">
-            <button class="btn btn-sm btn-secondary copy-btn" data-copy="response" data-key="${callKey}">Copy</button>
+            <button class="btn btn-sm btn-secondary copy-btn" data-copy="response" data-key="${this.escapeHtml(callKey)}">Copy</button>
           </div>
-          <div class="json-editor-container" data-field="responseBodyView" data-callkey="${callKey}" data-readonly="true"></div>
+          <div class="json-editor-container" data-field="responseBodyView" data-callkey="${this.escapeHtml(callKey)}" data-readonly="true"></div>
         </section>
       </div>
     `;
@@ -3994,7 +3829,7 @@ class NetworkWizardPanel {
       needsCollapse && !isExpanded ? entries.slice(0, maxVisible) : entries;
     const hiddenCount = entries.length - maxVisible;
 
-    let html = `<div class="headers-list" data-table-id="${tableId}">`;
+    let html = `<div class="headers-list" data-table-id="${this.escapeHtml(tableId)}">`;
     html += visibleEntries
       .map(
         ([name, value]) =>
@@ -4005,30 +3840,25 @@ class NetworkWizardPanel {
 
     if (needsCollapse) {
       if (isExpanded) {
-        html += `<button class="headers-toggle-btn" data-table-id="${tableId}">Show less</button>`;
+        html += `<button class="headers-toggle-btn" data-table-id="${this.escapeHtml(tableId)}">Show less</button>`;
       } else {
-        html += `<button class="headers-toggle-btn" data-table-id="${tableId}">Show ${hiddenCount} more...</button>`;
+        html += `<button class="headers-toggle-btn" data-table-id="${this.escapeHtml(tableId)}">Show ${hiddenCount} more...</button>`;
       }
     }
 
     return html;
   }
 
-  formatBody(body) {
-    if (!body) {
-      return '<span class="text-muted">No body</span>';
-    }
-    try {
-      return this.escapeHtml(JSON.stringify(JSON.parse(body), null, 2));
-    } catch (e) {
-      return this.escapeHtml(body);
-    }
-  }
-
   escapeHtml(str) {
-    const div = document.createElement("div");
-    div.textContent = str;
-    return div.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    if (str === null || str === undefined) {
+      return "";
+    }
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   clear() {

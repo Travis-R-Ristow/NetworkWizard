@@ -12,13 +12,12 @@ A Chrome DevTools extension for monitoring, analyzing, and debugging network req
 - 📎 **Copy Support** - Copy request/response bodies or generate cURL commands
 - ⚡ **Real-time Updates** - Live capture with recording toggle
 - 🔮 **GraphQL Error Detection** - Identifies GQL errors even on 200 responses
-- 🚫 **Request Blocking** - Block specific REST URLs or GraphQL operations (persisted per origin)
-- 🎭 **Response Override** - Mock responses with custom status, headers, and body (persisted per origin)
+- 🚫 **Request Blocking** - Block specific REST URLs or GraphQL operations
+- 🎭 **Response Override** - Mock responses with custom status, headers, and body
+- ✏️ **Request Override** - Rewrite the outgoing request body before it is sent
+- 🐢 **Request Delay** - Delay a request before it is sent, or hold its response, to test loading states and timeouts
+- 🌐 **Scoping** - Every block, override, and delay applies either to the current origin or to all sites
 - 📥 **Import/Export** - Import and export override configurations
-
-### 🚧 Coming Soon
-
-- 🐢 **Response Delay** - Simulate slow network conditions
 
 ## 📦 Installation
 
@@ -48,8 +47,11 @@ Click any row to expand and view:
 ### Actions
 
 - **Override** - Create/edit response override (opens Overrides tab)
+- **Delay** - Create/edit a delay for this call (opens Delays tab)
 - **Block** - Block requests from being sent
 - **Copy cURL** - Generate and copy cURL command from kebab menu
+
+If a call is already covered by an existing rule, these buttons open that rule instead of creating a duplicate.
 
 ### Controls
 
@@ -66,14 +68,28 @@ Click any row to expand and view:
 
 - Use the **Overrides** tab to view and manage all response overrides
 - Click any override row to expand and edit:
-  - **Match Params/Variables** - Override only specific requests (by query params or GQL variables)
+  - **Scope** - This site only, or all sites
+  - **Match Params/Variables** - When enabled, the override only fires for requests whose query params / GQL variables match. When **disabled, the override fires for every request to that endpoint or operation**, regardless of params or variables
+  - **Override Request** - Replace the outgoing request body
   - **Status** - Custom status code and text (leave empty to keep original)
   - **Response Headers** - Edit as key-value pairs or raw JSON
   - **Response Body** - Custom response JSON
 - Toggle overrides on/off without deleting configuration
 - Import response body JSON or full override configuration
 - Export individual overrides or all at once
-- Overrides persist per origin and restore on reload
+- Overrides restore on reload and follow their scope across navigations
+
+### Managing Delays
+
+- Use the **Delays** tab to set a duration (1-300s) and pick the timing:
+  - **Before Request** - Hold the request before it is sent
+  - **After Response** - Let the request through, then hold the response
+- Delays combine with overrides: a "before" delay also delays a mocked response
+
+## ⚠️ Notes
+
+- Blocking, overrides, and delays require the debugger, so Chrome shows a "started debugging this browser" banner while any rule is active. It detaches automatically once the last rule is removed or disabled.
+- Request bodies above Chrome's inspection limit cannot be matched; the status drawer logs a warning when this happens.
 
 ## 📁 Project Structure
 
@@ -86,9 +102,23 @@ NetworkWizard/
 ├── panel/
 │   ├── panel.html     # Panel UI structure
 │   ├── panel.css      # Styles
-│   └── panel.js       # Panel logic
+│   ├── panel.js       # Panel logic
+│   ├── json-editor.js # Tree/text JSON viewer & editor
+│   └── json-editor.css
+├── test/              # Regression suites (no dependencies)
 └── icons/             # Extension icons
 ```
+
+## 🧪 Tests
+
+```
+npm test
+```
+
+Runs every `test/*.test.js` suite in its own process against the real source files,
+with `chrome.*` and the DOM stubbed by `test/harness.js`. No dependencies, no build step.
+Covers rule resolution and scoping, request/response interception, delay timing,
+storage migration and write batching, and HTML escaping.
 
 ## 🔐 Permissions
 

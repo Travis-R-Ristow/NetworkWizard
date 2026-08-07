@@ -1,3 +1,6 @@
+const TEXT_VIEW_MAX_RATIO = 0.4;
+const TEXT_VIEW_MIN_HEIGHT = 120;
+
 class JsonEditor {
   constructor(container, options = {}) {
     this.container = typeof container === 'string' ? document.querySelector(container) : container;
@@ -13,6 +16,7 @@ class JsonEditor {
     this.parseError = null;
     this.mode = 'tree';
     this.collapsedPaths = new Set();
+    this.pathMeta = new Map();
     this.searchState = {
       query: '',
       matches: [],
@@ -61,6 +65,7 @@ class JsonEditor {
       modeButtons: this.container.querySelectorAll('.json-editor-mode-btn'),
       searchInput: this.container.querySelector('.json-editor-search-input'),
       searchCount: this.container.querySelector('.json-editor-search-count'),
+      content: this.container.querySelector('.json-editor-content'),
       treeView: this.container.querySelector('.json-editor-tree-view'),
       textView: this.container.querySelector('.json-editor-text-view'),
       status: this.container.querySelector('.json-editor-status'),
@@ -110,6 +115,7 @@ class JsonEditor {
       const newHeight = Math.max(100, startHeight + delta) + "px";
       this.container.style.maxHeight = newHeight;
       this.container.style.height = newHeight;
+      this.fitTextView();
     };
 
     const onMouseUp = () => {
@@ -130,6 +136,7 @@ class JsonEditor {
     handle.addEventListener("dblclick", () => {
       this.container.style.maxHeight = "";
       this.container.style.height = "";
+      this.fitTextView();
     });
   }
 
@@ -269,10 +276,14 @@ class JsonEditor {
   }
 
   getValueAtPath(path) {
-    const parts = this.parsePath(path);
+    const meta = this.pathMeta.get(path);
+    if (!meta) {
+      return undefined;
+    }
+
     let current = this.parsedJson;
 
-    for (const part of parts) {
+    for (const part of meta.parts) {
       if (current === null || current === undefined) {
         return undefined;
       }
@@ -283,28 +294,36 @@ class JsonEditor {
   }
 
   setValueAtPath(path, value) {
-    const parts = this.parsePath(path);
+    const meta = this.pathMeta.get(path);
+    if (!meta) {
+      return;
+    }
+
+    const parts = meta.parts;
+
+    if (parts.length === 0) {
+      this.parsedJson = value;
+      return;
+    }
+
     let current = this.parsedJson;
 
     for (let i = 0; i < parts.length - 1; i++) {
       current = current[parts[i]];
+      if (current === null || current === undefined) {
+        return;
+      }
     }
 
     current[parts[parts.length - 1]] = value;
-  }
-
-  parsePath(path) {
-    if (path === '$') {
-      return [];
-    }
-    return path.slice(2).split(/\.|\[|\]/).filter(p => p !== '');
   }
 
   handleTextInput() {
     this.value = this.elements.textView.value;
     this.parseJson();
     this.updateStatus();
-    
+    this.fitTextView();
+
     if (this.options.onChange) {
       this.options.onChange(this.value);
     }
@@ -370,6 +389,7 @@ class JsonEditor {
       this.elements.textView.classList.remove('hidden');
       this.elements.textView.value = this.value;
       this.formatJson();
+      this.fitTextView();
       if (this.searchState.query) {
         this.highlightTextMatches();
       }
@@ -389,7 +409,7 @@ class JsonEditor {
       this.renderTree();
     } else {
       this.elements.textView.value = this.value;
-      this.autoSizeTextView();
+      this.fitTextView();
     }
 
     this.updateStatus();
@@ -415,7 +435,7 @@ class JsonEditor {
       this.elements.treeView.scrollTop = scrollTop;
     } else {
       this.elements.textView.value = this.value;
-      this.autoSizeTextView();
+      this.fitTextView();
     }
 
     if (searchQuery) {
@@ -466,15 +486,19 @@ class JsonEditor {
     }
 
     this.searchState.matches = [];
+    this.pathMeta = new Map();
     const html = this.renderNode(this.parsedJson, '$', null, 0);
     this.elements.treeView.innerHTML = html;
     this.updateSearchCount();
   }
 
-  renderNode(value, path, key, depth, trailingComma = false) {
+  renderNode(value, path, key, depth, trailingComma = false, parts = [], parentPath = null) {
     const type = this.getType(value);
     const isCollapsed = this.collapsedPaths.has(path);
     const commaHtml = trailingComma ? '<span class="json-comma">,</span>' : '';
+    const safePath = this.escapeHtml(path);
+
+    this.pathMeta.set(path, { parts, parentPath });
 
     const keyMatches = this.doesKeyMatch(key);
     const valueMatches = this.doesValueMatch(value, type);
@@ -497,7 +521,7 @@ class JsonEditor {
       const isEmpty = entries.length === 0;
 
       if (isEmpty) {
-        return `<div class="json-node" data-path="${path}">
+        return `<div class="json-node" data-path="${safePath}">
           ${keyHtml}<span class="json-bracket">${bracketOpen}${bracketClose}</span>${commaHtml}
         </div>`;
       }
@@ -505,8 +529,8 @@ class JsonEditor {
       const toggleIcon = isCollapsed ? '▶' : '▼';
       const preview = isCollapsed ? this.getCollapsedPreview(value, type) : '';
 
-      let html = `<div class="json-node json-node-expandable${isCollapsed ? ' collapsed' : ''}" data-path="${path}">
-        <span class="json-node-toggle" data-path="${path}">${toggleIcon}</span>
+      let html = `<div class="json-node json-node-expandable${isCollapsed ? ' collapsed' : ''}" data-path="${safePath}">
+        <span class="json-node-toggle" data-path="${safePath}">${toggleIcon}</span>
         ${keyHtml}<span class="json-bracket">${bracketOpen}</span>`;
 
       if (isCollapsed) {
@@ -521,7 +545,7 @@ class JsonEditor {
         entries.forEach(([k, v], index) => {
           const childPath = type === 'object' ? `${path}.${k}` : `${path}[${k}]`;
           const hasTrailingComma = index < entries.length - 1;
-          html += `<div class="json-node-child">${this.renderNode(v, childPath, k, depth + 1, hasTrailingComma)}</div>`;
+          html += `<div class="json-node-child">${this.renderNode(v, childPath, k, depth + 1, hasTrailingComma, parts.concat([k]), path)}</div>`;
         });
         html += `</div>`;
         html += `<div class="json-node"><span class="json-bracket">${bracketClose}</span>${commaHtml}</div>`;
@@ -541,7 +565,7 @@ class JsonEditor {
       displayValue = this.escapeHtml(String(value));
     }
 
-    return `<div class="json-node" data-path="${path}">${keyHtml}<span class="${valueClass}">${displayValue}</span>${commaHtml}</div>`;
+    return `<div class="json-node" data-path="${safePath}">${keyHtml}<span class="${valueClass}">${displayValue}</span>${commaHtml}</div>`;
   }
 
   getType(value) {
@@ -560,7 +584,7 @@ class JsonEditor {
     }
     const keys = Object.keys(value);
     if (keys.length <= 3) {
-      return keys.map(k => `"${k}"`).join(', ') + '...';
+      return keys.map(k => `"${this.escapeHtml(k)}"`).join(', ') + '...';
     }
     return `${keys.length} properties...`;
   }
@@ -671,7 +695,7 @@ class JsonEditor {
     const allMatches = this.elements.treeView.querySelectorAll('.search-match');
     allMatches.forEach(el => el.classList.remove('search-current'));
 
-    const targetNode = this.elements.treeView.querySelector(`[data-path="${match.path}"]`);
+    const targetNode = this.elements.treeView.querySelector(`[data-path="${CSS.escape(match.path)}"]`);
     if (targetNode) {
       const selector = match.type === 'key' ? '.json-key.search-match' : '.json-value.search-match';
       const targetElement = targetNode.querySelector(selector);
@@ -683,16 +707,13 @@ class JsonEditor {
   }
 
   expandPathToNode(path) {
-    const parts = path.split(/[\.\[\]]/).filter(Boolean);
-    let currentPath = '$';
-    
-    for (let i = 0; i < parts.length - 1; i++) {
-      if (parts[i] !== '$') {
-        currentPath += /^\d+$/.test(parts[i]) ? `[${parts[i]}]` : `.${parts[i]}`;
-      }
-      this.collapsedPaths.delete(currentPath);
+    let meta = this.pathMeta.get(path);
+
+    while (meta && meta.parentPath) {
+      this.collapsedPaths.delete(meta.parentPath);
+      meta = this.pathMeta.get(meta.parentPath);
     }
-    
+
     this.renderTree();
   }
 
@@ -751,7 +772,7 @@ class JsonEditor {
 
     if (this.mode === 'text') {
       this.elements.textView.value = this.value;
-      this.autoSizeTextView();
+      this.fitTextView();
     }
 
     if (this.options.onChange) {
@@ -759,10 +780,25 @@ class JsonEditor {
     }
   }
 
-  autoSizeTextView() {
-    const tv = this.elements.textView;
-    tv.style.height = 'auto';
-    tv.style.height = tv.scrollHeight + 'px';
+  fitTextView() {
+    if (this.mode !== 'text') {
+      return;
+    }
+
+    const textView = this.elements.textView;
+
+    if (this.container.style.height) {
+      textView.style.height = `${this.elements.content.clientHeight}px`;
+      return;
+    }
+
+    const maxHeight = Math.max(
+      TEXT_VIEW_MIN_HEIGHT,
+      window.innerHeight * TEXT_VIEW_MAX_RATIO,
+    );
+
+    textView.style.height = 'auto';
+    textView.style.height = `${Math.min(textView.scrollHeight, maxHeight)}px`;
   }
 
   updateStatus() {
@@ -781,9 +817,15 @@ class JsonEditor {
   }
 
   escapeHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    if (str === null || str === undefined) {
+      return '';
+    }
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   setReadOnly(readOnly) {
