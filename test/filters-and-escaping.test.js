@@ -49,13 +49,13 @@ const doImport = (payload) => {
 };
 
 doImport([{ key: 'gql:LegacyOp', type: 'GQL', callName: 'LegacyOp', responseBody: '{}' }]);
-t('imported legacy key is migrated', p.overrides.has('gql:LegacyOp:*'), true);
-t('imported entry defaults enabled', p.overrides.get('gql:LegacyOp:*').enabled, true);
-t('imported entry gets the site scope origin', p.overrides.get('gql:LegacyOp:*').scopeOrigin, 'https://site-a.test');
+t('imported legacy key is migrated', p.getRule(p.overrides, "gql:LegacyOp:*", "site") !== null, true);
+t('imported entry defaults enabled', p.getRule(p.overrides, "gql:LegacyOp:*", "site").enabled, true);
+t('imported entry gets the site scope origin', p.getRule(p.overrides, "gql:LegacyOp:*", "site").scopeOrigin, 'https://site-a.test');
 
 p.overrides.clear();
 doImport([{ key: 'gql:G:aaaaaaaa', type: 'GQL', callName: 'G', scope: 'global', scopeOrigin: 'https://stale.test', statusCode: 'Failed' }]);
-const g = p.overrides.get('gql:G:aaaaaaaa');
+const g = p.getRule(p.overrides, "gql:G:aaaaaaaa", "global");
 t('imported global keeps global scope', g.scope, 'global');
 t('imported global drops any stale scopeOrigin', 'scopeOrigin' in g, false);
 t('imported invalid status is rejected', g.statusCode, null);
@@ -63,7 +63,7 @@ t('imported entry keeps response override on by default', g.responseBodyOverride
 
 p.overrides.clear();
 doImport({ key: 'gql:S:bbbbbbbb', type: 'GQL', callName: 'S', statusCode: 503 });
-t('imported valid status kept', p.overrides.get('gql:S:bbbbbbbb').statusCode, 503);
+t('imported valid status kept', p.getRule(p.overrides, "gql:S:bbbbbbbb", "site").statusCode, 503);
 t('single-object import works', p.overrides.size, 1);
 p.attachDebugger = origAttach;
 

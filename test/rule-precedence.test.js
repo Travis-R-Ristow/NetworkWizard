@@ -11,37 +11,38 @@ p.detachDebugger = () => {};
 p.checkDebuggerNeeded = () => {};
 const reset = () => { p.overrides.clear(); p.delays.clear(); p.blockedCalls.clear(); p.calls.clear(); p.intercepts.clear(); };
 const site = (key, extra = {}) => ({ key, scope: 'site', scopeOrigin: ORIGIN, ...extra });
+const id = (key, scope = "site") => `${scope}|${key}`;
 
 const hashKey = p.generateCallKey(true, 'GetUser', null, { id: 1 });
 const otherKey = p.generateCallKey(true, 'GetUser', null, { id: 2 });
 const wildKey = 'gql:GetUser:*';
 
 reset();
-p.blockedCalls.set(hashKey, site(hashKey));
-p.blockedCalls.set(wildKey, site(wildKey));
+p.setRule(p.blockedCalls, site(hashKey));
+p.setRule(p.blockedCalls, site(wildKey));
 p.blockedListSnapshot = new Map(p.blockedCalls);
-p.toggleBlockEntry(hashKey);
-t('blocked-tab unblock removes only the listed rule', Array.from(p.blockedCalls.keys()), [wildKey]);
-t('the other rule survives', p.blockedCalls.has(wildKey), true);
-p.toggleBlockEntry(wildKey);
+p.toggleBlockEntry(id(hashKey));
+t('blocked-tab unblock removes only the listed rule', Array.from(p.blockedCalls.keys()), [id(wildKey)]);
+t('the other rule survives', p.blockedCalls.has(id(wildKey)), true);
+p.toggleBlockEntry(id(wildKey));
 t('the second rule can also be removed', p.blockedCalls.size, 0);
 
 reset();
-p.blockedCalls.set(wildKey, { key: wildKey, scope: 'global' });
+p.setRule(p.blockedCalls, { key: wildKey, scope: 'global' });
 p.blockedListSnapshot = new Map(p.blockedCalls);
-p.toggleBlockEntry(wildKey);
+p.toggleBlockEntry(id(wildKey, "global"));
 t('global rule removed', p.blockedCalls.size, 0);
-Promise.resolve(p.toggleBlockEntry(wildKey)).then(() => {
-  t('re-block preserves global scope', p.blockedCalls.get(wildKey).scope, 'global');
-  t('re-block does not add a scopeOrigin', 'scopeOrigin' in p.blockedCalls.get(wildKey), false);
+Promise.resolve(p.toggleBlockEntry(id(wildKey, "global"))).then(() => {
+  t('re-block preserves global scope', p.blockedCalls.get(id(wildKey, "global")).scope, 'global');
+  t('re-block does not add a scopeOrigin', 'scopeOrigin' in p.blockedCalls.get(id(wildKey, "global")), false);
 
   reset();
-  p.blockedCalls.set(wildKey, site(wildKey));
+  p.setRule(p.blockedCalls, site(wildKey));
   p.toggleBlock(hashKey);
   t('network-row unblock clears the wildcard rule', p.blockedCalls.size, 0);
 
   reset();
-  p.overrides.set(hashKey, site(hashKey, {
+  p.setRule(p.overrides, site(hashKey, {
     enabled: true, matchVariablesEnabled: false,
     requestBodyOverrideEnabled: true, requestBody: '{"x":1}',
     responseBodyOverrideEnabled: true, responseBody: '{"mock":1}',
@@ -61,12 +62,12 @@ Promise.resolve(p.toggleBlockEntry(wildKey)).then(() => {
   t('mock still delivered at the response stage', sent[0].cmd, 'Fetch.fulfillRequest');
 
   reset();
-  p.delays.set(wildKey, site(wildKey, { enabled: true, delayMs: 1000, delayBefore: false }));
+  p.setRule(p.delays, site(wildKey, { enabled: true, delayMs: 1000, delayBefore: false }));
   p.handlePausedRequest({ requestId: 'f3', networkId: 'net-d', request: { url: 'https://site-a.test/graphql', postData: gqlBody } });
   t('after-delay is remembered for the response stage', p.intercepts.get('net-d').callKey, hashKey);
 
   reset();
-  p.delays.set(wildKey, site(wildKey, { enabled: true, delayMs: 1000, delayBefore: true }));
+  p.setRule(p.delays, site(wildKey, { enabled: true, delayMs: 1000, delayBefore: true }));
   p.handlePausedRequest({ requestId: 'f4', networkId: 'net-b', request: { url: 'https://site-a.test/graphql', postData: gqlBody } });
   t('before-delay is not remembered', p.intercepts.size, 0);
 
@@ -79,7 +80,7 @@ Promise.resolve(p.toggleBlockEntry(wildKey)).then(() => {
   p.handlePausedRequest({ requestId: 'f5', responseStatusCode: 200, request: { url: 'https://site-a.test/graphql', hasPostData: true } });
   t('no warning at the response stage when no delays exist', events.length, 0);
   t('response still continues', sent[0].cmd, 'Fetch.continueResponse');
-  p.delays.set(wildKey, site(wildKey, { enabled: true, delayMs: 500, delayBefore: false }));
+  p.setRule(p.delays, site(wildKey, { enabled: true, delayMs: 500, delayBefore: false }));
   sent = [];
   p.handlePausedRequest({ requestId: 'f6', responseStatusCode: 200, request: { url: 'https://site-a.test/graphql', postData: gqlBody } });
   t('mid-flight after-delay still applies without tracking', sent.length, 0);
@@ -87,16 +88,16 @@ Promise.resolve(p.toggleBlockEntry(wildKey)).then(() => {
 
   reset();
   p.calls.set(hashKey, { type: 'GQL', callName: 'GetUser', method: 'POST', requestBody: gqlBody, matchParams: { id: 1 }, fullUrl: 'https://site-a.test/graphql' });
-  p.overrides.set(hashKey, site(hashKey, { enabled: true, deleted: true, matchVariablesEnabled: false, responseBodyOverrideEnabled: true }));
-  p.overrides.set(wildKey, site(wildKey, { enabled: true, matchVariablesEnabled: false, responseBodyOverrideEnabled: true }));
+  p.setRule(p.overrides, site(hashKey, { enabled: true, deleted: true, matchVariablesEnabled: false, responseBodyOverrideEnabled: true }));
+  p.setRule(p.overrides, site(wildKey, { enabled: true, matchVariablesEnabled: false, responseBodyOverrideEnabled: true }));
   t('deleted exact rule does not shadow an applicable rule',
     p.attachedRule(p.overrides, hashKey, p.getOverrideForCurrentSite(hashKey)).key, wildKey);
-  p.overrides.delete(wildKey);
+  p.overrides.delete(id(wildKey));
   t('deleted rule reachable when nothing applies',
     p.attachedRule(p.overrides, hashKey, p.getOverrideForCurrentSite(hashKey)).key, hashKey);
   reset();
   p.calls.set(hashKey, { type: 'GQL', callName: 'GetUser', method: 'POST', requestBody: gqlBody, matchParams: { id: 1 } });
-  p.overrides.set(hashKey, site(hashKey, { enabled: true, matchVariablesEnabled: true, matchVariables: { id: 777 }, responseBodyOverrideEnabled: true }));
+  p.setRule(p.overrides, site(hashKey, { enabled: true, matchVariablesEnabled: true, matchVariables: { id: 777 }, responseBodyOverrideEnabled: true }));
   t('non-matching exact rule does not apply', p.getOverrideForCurrentSite(hashKey), null);
   t('non-matching exact rule is still attached to the row',
     p.attachedRule(p.overrides, hashKey, p.getOverrideForCurrentSite(hashKey)).key, hashKey);
@@ -108,7 +109,7 @@ Promise.resolve(p.toggleBlockEntry(wildKey)).then(() => {
 
   reset();
   p.calls.set(hashKey, { type: 'GQL', callName: 'GetUser', method: 'POST', requestBody: gqlBody, matchParams: { id: 1 } });
-  p.delays.set(wildKey, site(wildKey, { enabled: true, delayMs: 4000, delayBefore: false }));
+  p.setRule(p.delays, site(wildKey, { enabled: true, delayMs: 4000, delayBefore: false }));
   const row2 = p.renderCallRow(hashKey, p.calls.get(hashKey));
   t('tooltip shows the applied delay', row2.includes('4s after'), true);
 

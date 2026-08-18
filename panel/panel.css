@@ -1010,10 +1010,15 @@ body {
   accent-color: var(--color-primary);
 }
 
+.override-section.hidden,
 .override-match-content.hidden,
 .override-request-content.hidden,
 .override-response-content.hidden {
   display: none;
+}
+
+.scope-toggle-row .override-match-toggle {
+  margin-left: auto;
 }
 
 .override-section-subheader {

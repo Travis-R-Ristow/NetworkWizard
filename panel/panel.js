@@ -1,5 +1,47 @@
 const WRITE_DEBOUNCE_MS = 250;
 const MAX_TRACKED_INTERCEPTS = 500;
+const HEADER_SIDES = ["req", "res"];
+const DETAIL_EDITOR_FIELDS = ["requestBody", "responseBodyView", "requestBodyOverride"];
+const REQUEST_EDITOR_FIELDS = ["requestBody", "requestBodyOverride"];
+const OVERRIDE_EDITOR_FIELDS = ["request", "response"];
+
+const OVERRIDE_ACTIONS = {
+  "toggle-enabled": (panel, key) => panel.setRuleEnabled("overrides", key),
+  delete: (panel, key) => panel.setRuleDeleted("overrides", key, true),
+  restore: (panel, key) => panel.setRuleDeleted("overrides", key, false),
+  "permanent-delete": (panel, key) => panel.purgeRule("overrides", key),
+  export: (panel, key) => panel.exportOverride(key),
+  "export-all": (panel) => panel.exportAllOverrides(),
+  "import-full": (panel) => panel.importFullOverride(),
+  "import-body": (panel, key) => panel.importOverrideBody(key),
+  "set-headers-view": (panel, key, data) =>
+    panel.setHeadersViewMode(key, data.view),
+  "add-header": (panel, key) => panel.addHeaderEntry(key),
+  "remove-header": (panel, key, data) =>
+    panel.removeHeaderEntry(key, parseInt(data.idx, 10)),
+  "restore-header": (panel, key, data) =>
+    panel.restoreHeaderEntry(key, parseInt(data.idx, 10)),
+  "add-match": (panel, key, data) => panel.addMatchEntry(key, data.field),
+  "remove-match": (panel, key, data) =>
+    panel.removeMatchEntry(key, data.field, parseInt(data.idx, 10)),
+  "restore-match": (panel, key, data) =>
+    panel.restoreMatchEntry(key, data.field, parseInt(data.idx, 10)),
+  "set-scope": (panel, key, data) =>
+    panel.setRuleScope("overrides", key, data.scope),
+  "set-scope-filter": (panel, key, data) => panel.setScopeFilter(data.filter),
+};
+
+const DELAY_ACTIONS = {
+  "toggle-enabled": (panel, key) => panel.setRuleEnabled("delays", key),
+  delete: (panel, key) => panel.setRuleDeleted("delays", key, true),
+  restore: (panel, key) => panel.setRuleDeleted("delays", key, false),
+  "permanent-delete": (panel, key) => panel.purgeRule("delays", key),
+  "set-timing": (panel, key, data) =>
+    panel.setDelayTiming(key, data.timing === "before"),
+  "set-delay-scope": (panel, key, data) =>
+    panel.setRuleScope("delays", key, data.scope),
+  "set-scope-filter": (panel, key, data) => panel.setScopeFilter(data.filter),
+};
 
 class NetworkWizardPanel {
   constructor() {
@@ -13,6 +55,8 @@ class NetworkWizardPanel {
     this.blockedListSnapshot = new Map();
     this.scopeFilter = "all";
     this.jsonEditors = new Map();
+    this.callRowHtml = new Map();
+    this.overrideRowHtml = new Map();
     this.expandedCall = null;
     this.expandedOverride = null;
     this.expandedDelay = null;
@@ -175,7 +219,7 @@ class NetworkWizardPanel {
           migrated = true;
           delete entry.migrated;
         }
-        target.set(entry.key, entry);
+        this.setRule(target, entry);
       };
 
       globalEntries.forEach((raw) => add(raw, "global"));
@@ -558,7 +602,7 @@ class NetworkWizardPanel {
     const filtered = this.filterByScope(snapshot.entries());
 
     if (snapshot.size === 0) {
-      this.elements.blockedList.innerHTML = "";
+      this.elements.blockedList.innerHTML = this.renderScopeFilterToolbar();
       this.elements.blockedEmptyState.style.display = "flex";
       return;
     }
@@ -583,9 +627,9 @@ class NetworkWizardPanel {
           ${!hasFilteredResults ? `<tr><td colspan="4" class="no-filter-results">No ${this.scopeFilter === "global" ? "global" : "site-specific"} blocked calls</td></tr>` : ""}
           ${filtered
             .map(([key, block]) => {
-              const isGql = key.startsWith("gql:");
-              const name = this.getDisplayName(key);
-              const isWildcard = this.isWildcardKey(key);
+              const isGql = block.key.startsWith("gql:");
+              const name = this.getDisplayName(block.key);
+              const isWildcard = this.isWildcardKey(block.key);
               const badgeClass = isGql ? "badge-gql" : "badge-rest";
               const wildcardBadge = isWildcard
                 ? '<span class="badge badge-wildcard">All Vars</span>'
@@ -658,18 +702,15 @@ class NetworkWizardPanel {
     }
   }
 
-  toggleBlockedScope(key) {
-    const block = this.blockedCalls.get(key);
+  toggleBlockedScope(ruleId) {
+    const block = this.blockedCalls.get(ruleId);
     if (!block) {
       return;
     }
 
-    if (block.scope === "global") {
-      block.scope = "site";
-      block.scopeOrigin = this.currentOrigin;
-    } else {
-      block.scope = "global";
-      delete block.scopeOrigin;
+    const nextScope = this.ruleScope(block) === "global" ? "site" : "global";
+    if (!this.applyRuleScope(this.blockedCalls, ruleId, block, nextScope)) {
+      return;
     }
 
     this.blockedListSnapshot = new Map(this.blockedCalls);
@@ -677,119 +718,62 @@ class NetworkWizardPanel {
     this.renderBlockedList();
     this.addEvent(
       "info",
-      `Block scope changed to ${block.scope === "global" ? "All Sites" : "This Site"}`,
+      `Block scope changed to ${nextScope === "global" ? "All Sites" : "This Site"}`,
     );
   }
 
+  applyRuleScope(source, ruleId, entry, scope) {
+    const target = `${scope}|${entry.key}`;
+    if (target !== ruleId && source.has(target)) {
+      this.addEvent(
+        "warning",
+        `A ${scope === "global" ? "All Sites" : "This Site"} rule already exists for ${this.getDisplayName(entry.key)}`,
+      );
+      return false;
+    }
+
+    entry.scope = scope;
+    if (scope === "site") {
+      entry.scopeOrigin = this.currentOrigin;
+    } else {
+      delete entry.scopeOrigin;
+    }
+    this.rekeyRule(source, ruleId, entry);
+    return true;
+  }
+
   renderOverridesList() {
-    const pageScrollTop =
-      document.documentElement.scrollTop || document.body.scrollTop;
-    const viewScrollTop = this.elements.overridesView.scrollTop;
-
-    const headersScrollPositions = new Map();
-    this.elements.overridesList
-      .querySelectorAll(".headers-scroll-area")
-      .forEach((el) => {
-        const key =
-          el.closest(".override-details")?.previousElementSibling?.dataset?.key;
-        if (key && el.scrollTop > 0) {
-          headersScrollPositions.set(key, el.scrollTop);
-        }
-      });
-
-    const matchScrollPositions = new Map();
-    this.elements.overridesList
-      .querySelectorAll(".match-scroll-area")
-      .forEach((el) => {
-        const key =
-          el.closest(".override-details")?.previousElementSibling?.dataset?.key;
-        if (key && el.scrollTop > 0) {
-          matchScrollPositions.set(key, el.scrollTop);
-        }
-      });
-
     const overrides = Array.from(this.overrides.entries());
 
     if (overrides.length === 0) {
-      this.elements.overridesList.innerHTML = "";
+      this.elements.overridesList.innerHTML = this.renderScopeFilterToolbar();
       this.elements.overridesEmptyState.style.display = "flex";
+      this.overrideRowHtml.clear();
       return;
     }
 
     this.elements.overridesEmptyState.style.display = "none";
 
-    const filtered = this.filterByScope(overrides);
-    const hasFilteredResults = filtered.length > 0;
+    const body = this.ensureOverridesShell();
+    this.syncOverrideRows(body, this.filterByScope(overrides));
+    this.initJsonEditors();
+  }
 
-    const toolbarHtml = `
+  ensureOverridesShell() {
+    const list = this.elements.overridesList;
+    const existing = list.querySelector("[data-overrides-body]");
+
+    if (existing) {
+      this.refreshScopeFilter(list);
+      return existing;
+    }
+
+    list.innerHTML = `
       ${this.renderScopeFilterToolbar()}
       <div class="overrides-toolbar">
         <button class="btn btn-sm btn-secondary" data-action="import-full">Import Override</button>
         <button class="btn btn-sm btn-secondary" data-action="export-all">Export All</button>
       </div>
-    `;
-
-    const noResultsRow = !hasFilteredResults
-      ? `<tr><td colspan="4" class="no-filter-results">No ${this.scopeFilter === "global" ? "global" : "site-specific"} overrides</td></tr>`
-      : "";
-
-    const rows = filtered
-      .map(([key, override]) => {
-        const isExpanded = this.expandedOverride === key && !override.deleted;
-        const isDeleted = override.deleted === true;
-        const badgeClass = override.type === "GQL" ? "badge-gql" : "badge-rest";
-        const isWildcard = this.isWildcardKey(key);
-        const wildcardBadge = isWildcard
-          ? '<span class="badge badge-wildcard">All Vars</span>'
-          : "";
-        const rowClass = `override-row${isExpanded ? " expanded" : ""}${isDeleted ? " deleted" : ""}`;
-        const scope = override.scope || "site";
-        const scopeLabel =
-          scope === "global"
-            ? "All Sites"
-            : this.truncateScopeOrigin(
-                override.scopeOrigin || this.currentOrigin,
-              );
-        const scopeBadgeClass =
-          scope === "global" ? "scope-badge-global" : "scope-badge-site";
-
-        let actionsHtml;
-        if (isDeleted) {
-          actionsHtml = `
-          <button class="btn btn-sm btn-unblock" data-action="restore" data-key="${this.escapeHtml(key)}">Restore</button>
-          <button class="btn btn-sm btn-danger" data-action="permanent-delete" data-key="${this.escapeHtml(key)}">Remove</button>
-        `;
-        } else {
-          const toggleClass = override.enabled
-            ? "btn btn-sm btn-unblock"
-            : "btn btn-sm btn-secondary";
-          const toggleText = override.enabled ? "Enabled" : "Disabled";
-          actionsHtml = `
-          <button class="${toggleClass}" data-action="toggle-enabled" data-key="${this.escapeHtml(key)}">${toggleText}</button>
-          <button class="btn btn-sm btn-secondary" data-action="export" data-key="${this.escapeHtml(key)}">Export</button>
-          <button class="btn btn-sm btn-danger" data-action="delete" data-key="${this.escapeHtml(key)}">Delete</button>
-        `;
-        }
-
-        let rowHtml = `
-        <tr class="${rowClass}" data-key="${this.escapeHtml(key)}">
-          <td><span class="expand-icon">${isDeleted ? "" : "▶"}</span> <span class="badge ${badgeClass}">${override.type}</span>${wildcardBadge}</td>
-          <td class="call-name" title="${this.escapeHtml(override.callName)}">${this.escapeHtml(this.truncateCallName(override.callName))}</td>
-          <td><span class="scope-badge ${scopeBadgeClass}" title="${this.escapeHtml(scope === "global" ? "Applies to all sites" : override.scopeOrigin || this.currentOrigin)}">${scopeLabel}</span></td>
-          <td class="actions-cell">${actionsHtml}</td>
-        </tr>
-      `;
-
-        if (isExpanded) {
-          rowHtml += `<tr class="override-details visible"><td colspan="4">${this.renderOverrideForm(override, key)}</td></tr>`;
-        }
-
-        return rowHtml;
-      })
-      .join("");
-
-    this.elements.overridesList.innerHTML = `
-      ${toolbarHtml}
       <table class="table">
         <thead>
           <tr>
@@ -799,44 +783,259 @@ class NetworkWizardPanel {
             <th>Actions</th>
           </tr>
         </thead>
-        <tbody>${noResultsRow}${rows}</tbody>
+        <tbody data-overrides-body></tbody>
       </table>
     `;
 
-    headersScrollPositions.forEach((scrollTop, key) => {
-      const row = this.elements.overridesList.querySelector(
-        `.override-row[data-key="${CSS.escape(key)}"]`,
-      );
-      const scrollArea = row?.nextElementSibling?.querySelector(
-        ".headers-scroll-area",
-      );
-      if (scrollArea) {
-        scrollArea.scrollTop = scrollTop;
-      }
-    });
+    this.overrideRowHtml.clear();
+    return list.querySelector("[data-overrides-body]");
+  }
 
-    matchScrollPositions.forEach((scrollTop, key) => {
-      const row = this.elements.overridesList.querySelector(
-        `.override-row[data-key="${CSS.escape(key)}"]`,
-      );
-      const scrollArea =
-        row?.nextElementSibling?.querySelector(".match-scroll-area");
-      if (scrollArea) {
-        scrollArea.scrollTop = scrollTop;
-      }
-    });
-
-    this.elements.overridesList
-      .querySelectorAll(".override-textarea.auto-size")
-      .forEach((textarea) => {
-        this.autoSizeTextarea(textarea);
+  refreshScopeFilter(container) {
+    container
+      .querySelectorAll("[data-action='set-scope-filter']")
+      .forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.filter === this.scopeFilter);
       });
+  }
 
-    this.initJsonEditors();
+  overrideDetailsFor(row) {
+    const next = row.nextElementSibling;
+    return next && next.classList.contains("override-details") ? next : null;
+  }
 
-    document.documentElement.scrollTop = document.body.scrollTop =
-      pageScrollTop;
-    this.elements.overridesView.scrollTop = viewScrollTop;
+  syncNoResultsRow(body, show) {
+    const existing = body.querySelector("tr.no-filter-results-row");
+
+    if (!show) {
+      if (existing) {
+        existing.remove();
+      }
+      return null;
+    }
+
+    const label = `No ${this.scopeFilter === "global" ? "global" : "site-specific"} overrides`;
+    const row = this.elementFromHtml(
+      `<tr class="no-filter-results-row"><td colspan="4" class="no-filter-results">${label}</td></tr>`,
+    );
+
+    if (existing) {
+      existing.replaceWith(row);
+    } else {
+      body.insertBefore(row, body.firstElementChild);
+    }
+    return row;
+  }
+
+  syncOverrideRows(body, filtered) {
+    const wanted = new Set(filtered.map(([key]) => key));
+    const existing = new Map();
+
+    Array.from(body.querySelectorAll("tr.override-row")).forEach((row) => {
+      const key = row.dataset.key;
+      if (wanted.has(key)) {
+        existing.set(key, row);
+        return;
+      }
+      this.discardOverrideRow(row, key);
+    });
+
+    let anchor = this.syncNoResultsRow(body, filtered.length === 0);
+
+    filtered.forEach(([key, override]) => {
+      const found = existing.get(key);
+      const row = found
+        ? this.refreshOverrideRowElement(found, key, override)
+        : this.createOverrideRowElement(key, override);
+
+      const target = anchor ? anchor.nextElementSibling : body.firstElementChild;
+      if (target !== row) {
+        const details = this.overrideDetailsFor(row);
+        body.insertBefore(row, target);
+        if (details) {
+          body.insertBefore(details, row.nextSibling);
+        }
+      }
+
+      anchor = this.syncOverrideDetails(body, row, key, override) || row;
+    });
+  }
+
+  createOverrideRowElement(key, override) {
+    const html = this.renderOverrideRow(key, override);
+    this.overrideRowHtml.set(key, html);
+    return this.elementFromHtml(html);
+  }
+
+  refreshOverrideRowElement(row, key, override) {
+    const html = this.renderOverrideRow(key, override);
+    if (this.overrideRowHtml.get(key) === html) {
+      return row;
+    }
+
+    const replacement = this.elementFromHtml(html);
+    this.overrideRowHtml.set(key, html);
+    row.replaceWith(replacement);
+    return replacement;
+  }
+
+  discardOverrideRow(row, key) {
+    const details = this.overrideDetailsFor(row);
+    if (details) {
+      details.remove();
+    }
+    this.destroyOverrideEditors(key);
+    this.overrideRowHtml.delete(key);
+    row.remove();
+  }
+
+  destroyOverrideEditors(key) {
+    OVERRIDE_EDITOR_FIELDS.forEach((field) => {
+      const editorKey = `${key}-${field}`;
+      const editor = this.jsonEditors.get(editorKey);
+      if (editor) {
+        editor.destroy();
+        this.jsonEditors.delete(editorKey);
+      }
+    });
+  }
+
+  syncOverrideDetails(body, row, key, override) {
+    const details = this.overrideDetailsFor(row);
+    const wanted = this.expandedOverride === key && !override.deleted;
+
+    if (!wanted) {
+      if (details) {
+        this.destroyOverrideEditors(key);
+        details.remove();
+      }
+      return null;
+    }
+
+    if (details) {
+      return details;
+    }
+
+    const created = this.elementFromHtml(
+      `<tr class="override-details visible"><td colspan="4">${this.renderOverrideForm(override, key)}</td></tr>`,
+    );
+    body.insertBefore(created, row.nextSibling);
+    this.autoSizeIn(created);
+    return created;
+  }
+
+  autoSizeIn(root) {
+    root
+      .querySelectorAll(".override-textarea.auto-size")
+      .forEach((textarea) => this.autoSizeTextarea(textarea));
+  }
+
+  expandedOverrideDetails(key) {
+    if (this.expandedOverride !== key) {
+      return null;
+    }
+    const row = this.elements.overridesList.querySelector(
+      `tr.override-row[data-key="${CSS.escape(key)}"]`,
+    );
+    return row ? this.overrideDetailsFor(row) : null;
+  }
+
+  patchOverrideMatch(key) {
+    const details = this.expandedOverrideDetails(key);
+    const override = this.overrides.get(key);
+    if (!details || !override) {
+      return;
+    }
+
+    const isGql = override.type === "GQL";
+    const enabled = isGql
+      ? override.matchVariablesEnabled
+      : override.matchParamsEnabled;
+
+    const section = details.querySelector(
+      `[data-match-section="${CSS.escape(key)}"]`,
+    );
+    if (section) {
+      section.classList.toggle("hidden", !enabled);
+    }
+
+    const content = details.querySelector(
+      `[data-match-content="${CSS.escape(key)}"]`,
+    );
+    if (content) {
+      content.innerHTML = isGql
+        ? this.renderMatchEditorJson(override.matchVariables, "matchVariables", key)
+        : this.renderMatchEditor(override.matchParams, "matchParams", key);
+      this.autoSizeIn(content);
+    }
+  }
+
+  patchOverrideHeaders(key) {
+    const details = this.expandedOverrideDetails(key);
+    const override = this.overrides.get(key);
+    if (!details || !override) {
+      return;
+    }
+
+    const content = details.querySelector(
+      `[data-headers-content="${CSS.escape(key)}"]`,
+    );
+    if (content) {
+      content.innerHTML = this.renderHeadersEditor(
+        override.responseHeaders,
+        this.overrideHeadersView.get(key) || "keyvalue",
+        key,
+      );
+    }
+  }
+
+  patchOverrideSection(key, attribute, visible) {
+    const details = this.expandedOverrideDetails(key);
+    if (!details) {
+      return;
+    }
+    const section = details.querySelector(
+      `[${attribute}="${CSS.escape(key)}"]`,
+    );
+    if (section) {
+      section.classList.toggle("hidden", !visible);
+    }
+  }
+
+  renderOverrideRow(key, override) {
+    const isExpanded = this.expandedOverride === key && !override.deleted;
+    const isDeleted = override.deleted === true;
+    const badgeClass = override.type === "GQL" ? "badge-gql" : "badge-rest";
+    const wildcardBadge = this.isWildcardKey(override.key)
+      ? '<span class="badge badge-wildcard">All Vars</span>'
+      : "";
+    const rowClass = `override-row${isExpanded ? " expanded" : ""}${isDeleted ? " deleted" : ""}`;
+    const scope = override.scope || "site";
+    const scopeOrigin = override.scopeOrigin || this.currentOrigin;
+    const scopeLabel =
+      scope === "global" ? "All Sites" : this.truncateScopeOrigin(scopeOrigin);
+    const scopeBadgeClass =
+      scope === "global" ? "scope-badge-global" : "scope-badge-site";
+
+    const actionsHtml = isDeleted
+      ? `
+          <button class="btn btn-sm btn-unblock" data-action="restore" data-key="${this.escapeHtml(key)}">Restore</button>
+          <button class="btn btn-sm btn-danger" data-action="permanent-delete" data-key="${this.escapeHtml(key)}">Remove</button>
+        `
+      : `
+          <button class="${override.enabled ? "btn btn-sm btn-unblock" : "btn btn-sm btn-secondary"}" data-action="toggle-enabled" data-key="${this.escapeHtml(key)}">${override.enabled ? "Enabled" : "Disabled"}</button>
+          <button class="btn btn-sm btn-secondary" data-action="export" data-key="${this.escapeHtml(key)}">Export</button>
+          <button class="btn btn-sm btn-danger" data-action="delete" data-key="${this.escapeHtml(key)}">Delete</button>
+        `;
+
+    return `
+        <tr class="${rowClass}" data-key="${this.escapeHtml(key)}">
+          <td><span class="expand-icon">${isDeleted ? "" : "▶"}</span> <span class="badge ${badgeClass}">${override.type}</span>${wildcardBadge}</td>
+          <td class="call-name" title="${this.escapeHtml(override.callName)}">${this.escapeHtml(this.truncateCallName(override.callName))}</td>
+          <td><span class="scope-badge ${scopeBadgeClass}" title="${this.escapeHtml(scope === "global" ? "Applies to all sites" : scopeOrigin)}">${scopeLabel}</span></td>
+          <td class="actions-cell">${actionsHtml}</td>
+        </tr>
+      `;
   }
 
   initJsonEditors() {
@@ -933,6 +1132,7 @@ class NetworkWizardPanel {
     const headersViewMode = this.overrideHeadersView.get(key) || "keyvalue";
     const isGql = override.type === "GQL";
 
+    const matchTerm = isGql ? "variables" : "params";
     const matchLabel = isGql ? "Match Variables" : "Match Params";
     const matchValue = isGql ? override.matchVariables : override.matchParams;
     const matchEnabled = isGql
@@ -964,18 +1164,18 @@ class NetworkWizardPanel {
               <button class="scope-toggle-btn${scope === "global" ? " active" : ""}" data-action="set-scope" data-scope="global" data-key="${this.escapeHtml(key)}">All Sites</button>
             </div>
             <span class="scope-origin-label ${scope === "global" ? "hidden" : ""}" data-scope-origin="${this.escapeHtml(key)}">${this.escapeHtml(scopeOrigin)}</span>
+            <label class="override-match-toggle" title="${matchEnabled ? `Only fires when the request's ${matchTerm} match below` : `Fires on every request to this ${isGql ? "operation" : "endpoint"}, whatever the ${matchTerm} are`}">
+              <input type="checkbox" data-field="${matchField}-enabled" data-key="${this.escapeHtml(key)}" ${matchEnabled ? "checked" : ""}>
+              <span>Match ${matchTerm}</span>
+            </label>
           </div>
         </div>
 
-        <div class="override-section">
+        <div class="override-section ${!matchEnabled ? "hidden" : ""}" data-match-section="${this.escapeHtml(key)}">
           <div class="override-section-header">
             <span class="override-section-title">${matchLabel}</span>
-            <label class="override-match-toggle">
-              <input type="checkbox" data-field="${matchField}-enabled" data-key="${this.escapeHtml(key)}" ${matchEnabled ? "checked" : ""}>
-              <span>Match specific ${isGql ? "variables" : "params"}</span>
-            </label>
           </div>
-          <div class="override-match-content ${!matchEnabled ? "hidden" : ""}" data-match-content="${this.escapeHtml(key)}">
+          <div class="override-match-content" data-match-content="${this.escapeHtml(key)}">
             ${matchHtml}
           </div>
         </div>
@@ -1189,51 +1389,9 @@ class NetworkWizardPanel {
   handleOverridesListClick(e) {
     const btn = e.target.closest("button[data-action]");
     if (btn) {
-      const action = btn.dataset.action;
-      const key = btn.dataset.key;
-
-      if (action === "toggle-enabled") {
-        this.toggleOverrideEnabled(key);
-      } else if (action === "delete") {
-        this.deleteOverride(key);
-      } else if (action === "restore") {
-        this.restoreOverride(key);
-      } else if (action === "permanent-delete") {
-        this.permanentlyDeleteOverride(key);
-      } else if (action === "export") {
-        this.exportOverride(key);
-      } else if (action === "export-all") {
-        this.exportAllOverrides();
-      } else if (action === "import-full") {
-        this.importFullOverride();
-      } else if (action === "import-body") {
-        this.importOverrideBody(key);
-      } else if (action === "set-headers-view") {
-        this.setHeadersViewMode(key, btn.dataset.view);
-      } else if (action === "add-header") {
-        this.addHeaderEntry(key);
-      } else if (action === "remove-header") {
-        this.removeHeaderEntry(key, parseInt(btn.dataset.idx));
-      } else if (action === "restore-header") {
-        this.restoreHeaderEntry(key, parseInt(btn.dataset.idx));
-      } else if (action === "add-match") {
-        this.addMatchEntry(key, btn.dataset.field);
-      } else if (action === "remove-match") {
-        this.removeMatchEntry(
-          key,
-          btn.dataset.field,
-          parseInt(btn.dataset.idx),
-        );
-      } else if (action === "restore-match") {
-        this.restoreMatchEntry(
-          key,
-          btn.dataset.field,
-          parseInt(btn.dataset.idx),
-        );
-      } else if (action === "set-scope") {
-        this.setOverrideScope(key, btn.dataset.scope);
-      } else if (action === "set-scope-filter") {
-        this.setScopeFilter(btn.dataset.filter);
+      const action = OVERRIDE_ACTIONS[btn.dataset.action];
+      if (action) {
+        action(this, btn.dataset.key, btn.dataset);
       }
       return;
     }
@@ -1342,28 +1500,28 @@ class NetworkWizardPanel {
         override.matchVariables = {};
       }
       this.saveOverrides();
-      this.renderOverridesList();
+      this.patchOverrideMatch(key);
     } else if (field === "matchParams-enabled") {
       override.matchParamsEnabled = target.checked;
       if (target.checked && !override.matchParams) {
         override.matchParams = [];
       }
       this.saveOverrides();
-      this.renderOverridesList();
+      this.patchOverrideMatch(key);
     } else if (field === "requestBodyOverrideEnabled") {
       override.requestBodyOverrideEnabled = target.checked;
       this.saveOverrides();
-      this.renderOverridesList();
+      this.patchOverrideSection(key, "data-request-content", target.checked);
     } else if (field === "responseBodyOverrideEnabled") {
       override.responseBodyOverrideEnabled = target.checked;
       this.saveOverrides();
-      this.renderOverridesList();
+      this.patchOverrideSection(key, "data-response-content", target.checked);
     }
   }
 
   setHeadersViewMode(key, view) {
     this.overrideHeadersView.set(key, view);
-    this.renderOverridesList();
+    this.patchOverrideHeaders(key);
   }
 
   addHeaderEntry(key) {
@@ -1379,7 +1537,7 @@ class NetworkWizardPanel {
       added: true,
     });
     this.saveOverrides();
-    this.renderOverridesList();
+    this.patchOverrideHeaders(key);
   }
 
   removeHeaderEntry(key, idx) {
@@ -1391,7 +1549,7 @@ class NetworkWizardPanel {
     if (override.responseHeaders[idx]) {
       override.responseHeaders[idx].deleted = true;
       this.saveOverrides();
-      this.renderOverridesList();
+      this.patchOverrideHeaders(key);
     }
   }
 
@@ -1404,7 +1562,7 @@ class NetworkWizardPanel {
     if (override.responseHeaders[idx]) {
       override.responseHeaders[idx].deleted = false;
       this.saveOverrides();
-      this.renderOverridesList();
+      this.patchOverrideHeaders(key);
     }
   }
 
@@ -1440,7 +1598,7 @@ class NetworkWizardPanel {
     override[field] = this.getMatchAsArray(override[field]);
     override[field].push({ name: "", value: "", deleted: false, added: true });
     this.saveOverrides();
-    this.renderOverridesList();
+    this.patchOverrideMatch(key);
   }
 
   removeMatchEntry(key, field, idx) {
@@ -1452,7 +1610,7 @@ class NetworkWizardPanel {
     if (override[field][idx]) {
       override[field][idx].deleted = true;
       this.saveOverrides();
-      this.renderOverridesList();
+      this.patchOverrideMatch(key);
     }
   }
 
@@ -1465,7 +1623,7 @@ class NetworkWizardPanel {
     if (override[field][idx]) {
       override[field][idx].deleted = false;
       this.saveOverrides();
-      this.renderOverridesList();
+      this.patchOverrideMatch(key);
     }
   }
 
@@ -1577,7 +1735,7 @@ class NetworkWizardPanel {
               entry.key = this.migrateOldKey(entry.key);
             }
 
-            this.overrides.set(entry.key, entry);
+            this.setRule(this.overrides, entry);
             imported++;
           });
 
@@ -2000,27 +2158,21 @@ class NetworkWizardPanel {
       this.expandedTables.add(tableId);
     }
 
-    const isReq = tableId.endsWith("-req");
+    const side = tableId.endsWith("-req") ? "req" : "res";
     const callKey = tableId.slice(0, -4);
     const call = this.calls.get(callKey);
     if (!call) {
       return;
     }
 
-    let headers = isReq ? call.requestHeaders : call.responseHeaders;
-    if (call.entry) {
-      if (!headers || Object.keys(headers).length === 0) {
-        headers = this.headersToObject(
-          isReq ? call.entry.request?.headers : call.entry.response?.headers,
-        );
-      }
-    }
-
     const container = this.elements.networkBody.querySelector(
-      `.details-card-body:has([data-table-id="${CSS.escape(tableId)}"])`,
+      `[data-headers-body="${CSS.escape(tableId)}"]`,
     );
     if (container) {
-      container.innerHTML = this.renderHeaders(headers, tableId);
+      container.innerHTML = this.renderHeaders(
+        this.callHeaders(call, side),
+        tableId,
+      );
     }
   }
 
@@ -2407,31 +2559,39 @@ class NetworkWizardPanel {
     return !entry.scopeOrigin || entry.scopeOrigin === this.currentOrigin;
   }
 
+  ruleSpecificity(entry, callKey, baseKey) {
+    if (entry.key === callKey) {
+      return 0;
+    }
+    if (entry.key === `${baseKey}:*`) {
+      return 1;
+    }
+    return 2;
+  }
+
   candidateEntries(source, callKey) {
     const baseKey = this.getBaseKey(callKey);
-    const ordered = [];
-    const seen = new Set();
+    const matches = [];
 
-    [callKey, `${baseKey}:*`].forEach((key) => {
-      if (seen.has(key)) {
+    source.forEach((entry) => {
+      if (this.getBaseKey(entry.key) !== baseKey || !this.isInScope(entry)) {
         return;
       }
-      seen.add(key);
-      const entry = source.get(key);
-      if (entry) {
-        ordered.push(entry);
-      }
+      matches.push(entry);
     });
 
-    source.forEach((entry, key) => {
-      if (seen.has(key) || this.getBaseKey(key) !== baseKey) {
-        return;
+    return matches.sort((a, b) => {
+      const scopeRank =
+        (this.ruleScope(a) === "global" ? 1 : 0) -
+        (this.ruleScope(b) === "global" ? 1 : 0);
+      if (scopeRank !== 0) {
+        return scopeRank;
       }
-      seen.add(key);
-      ordered.push(entry);
+      return (
+        this.ruleSpecificity(a, callKey, baseKey) -
+        this.ruleSpecificity(b, callKey, baseKey)
+      );
     });
-
-    return ordered.filter((entry) => this.isInScope(entry));
   }
 
   getActiveDelay(callKey) {
@@ -2447,7 +2607,7 @@ class NetworkWizardPanel {
   }
 
   attachedRule(source, callKey, appliedRule) {
-    const own = source.get(callKey);
+    const own = this.ownRule(source, callKey);
     if (own && !own.deleted) {
       return own;
     }
@@ -2652,45 +2812,42 @@ class NetworkWizardPanel {
     return this.candidateEntries(this.blockedCalls, callKey).length > 0;
   }
 
-  resolveBlockedKey(callKey) {
-    const entry = this.candidateEntries(this.blockedCalls, callKey)[0];
-    return entry ? entry.key : null;
-  }
-
   toggleBlock(callKey) {
-    const blockedKey = this.resolveBlockedKey(callKey);
-    if (blockedKey) {
-      return this.removeBlock(blockedKey);
+    const entry = this.candidateEntries(this.blockedCalls, callKey)[0];
+    if (entry) {
+      return this.removeBlock(entry);
     }
     return this.addBlock(callKey);
   }
 
-  toggleBlockEntry(key) {
-    if (this.blockedCalls.has(key)) {
-      return this.removeBlock(key);
+  toggleBlockEntry(ruleId) {
+    const entry = this.blockedCalls.get(ruleId);
+    if (entry) {
+      return this.removeBlock(entry);
     }
-    return this.addBlock(key, this.blockedListSnapshot.get(key));
+    const template = this.blockedListSnapshot.get(ruleId);
+    return template ? this.addBlock(template.key, template) : Promise.resolve();
   }
 
-  removeBlock(key) {
-    this.blockedCalls.delete(key);
-    this.addEvent("info", `Un-Blocked: ${key}`);
+  removeBlock(entry) {
+    this.blockedCalls.delete(this.ruleId(entry));
+    this.addEvent("info", `Un-Blocked: ${entry.key}`);
     this.saveBlockedCalls();
     this.checkDebuggerNeeded();
     this.renderCalls();
     return Promise.resolve();
   }
 
-  addBlock(key, template = null) {
+  addBlock(callKey, template = null) {
     return this.attachDebugger()
       .then(() => {
-        this.blockedCalls.set(
-          key,
+        this.setRule(
+          this.blockedCalls,
           template
-            ? { ...template, key }
-            : { key, scope: "site", scopeOrigin: this.currentOrigin },
+            ? { ...template, key: callKey }
+            : { key: callKey, scope: "site", scopeOrigin: this.currentOrigin },
         );
-        this.addEvent("success", `Blocking: ${key}`);
+        this.addEvent("success", `Blocking: ${callKey}`);
         this.saveBlockedCalls();
         this.renderCalls();
       })
@@ -2710,35 +2867,26 @@ class NetworkWizardPanel {
     );
 
     if (existing) {
-      this.expandedOverride = existing.key;
+      this.expandedOverride = this.ruleId(existing);
       this.switchView("overrides");
       return;
     }
 
     const isGql = callKey.startsWith("gql:");
-    let matchParams = null;
-    let matchParamsEnabled = false;
-    let matchVariables = null;
-    let matchVariablesEnabled = false;
-
-    if (isGql) {
-      const variables = this.extractGqlVariables(call.requestBody);
-      if (variables && Object.keys(variables).length > 0) {
-        matchVariables = variables;
-        matchVariablesEnabled = true;
-      }
-    } else {
-      const urlParams = this.parseUrlParams(call.fullUrl);
-      if (urlParams) {
-        matchParams = Object.entries(urlParams).map(([name, value]) => ({
+    const urlParams = isGql ? null : this.parseUrlParams(call.fullUrl);
+    const matchParams = isGql
+      ? null
+      : Object.entries(urlParams || {}).map(([name, value]) => ({
           name,
           value,
           deleted: false,
           added: false,
         }));
-        matchParamsEnabled = true;
-      }
-    }
+    const matchVariables = isGql
+      ? this.extractGqlVariables(call.requestBody) || {}
+      : null;
+    const matchParamsEnabled = !isGql;
+    const matchVariablesEnabled = isGql;
 
     let responseHeaders = null;
     if (call.responseHeaders && Object.keys(call.responseHeaders).length > 0) {
@@ -2752,7 +2900,7 @@ class NetworkWizardPanel {
       );
     }
 
-    this.overrides.set(callKey, {
+    const entry = this.setRule(this.overrides, {
       key: callKey,
       type: call.type,
       callName: call.callName,
@@ -2779,7 +2927,7 @@ class NetworkWizardPanel {
       })
       .catch(() => {});
 
-    this.expandedOverride = callKey;
+    this.expandedOverride = this.ruleId(entry);
     this.switchView("overrides");
   }
 
@@ -2793,82 +2941,104 @@ class NetworkWizardPanel {
     return null;
   }
 
-  toggleOverrideEnabled(key) {
-    const override = this.overrides.get(key);
-    if (!override) {
+  ruleStore(name) {
+    if (name === "overrides") {
+      return {
+        source: this.overrides,
+        label: "Override",
+        save: () => this.saveOverrides(),
+        render: () => this.renderOverridesList(),
+        expandedField: "expandedOverride",
+      };
+    }
+    return {
+      source: this.delays,
+      label: "Delay",
+      save: () => this.saveDelays(),
+      render: () => this.renderDelaysList(),
+      expandedField: "expandedDelay",
+    };
+  }
+
+  collapseRule(store, ruleId) {
+    if (this[store.expandedField] === ruleId) {
+      this[store.expandedField] = null;
+    }
+  }
+
+  commitRule(store) {
+    store.save();
+    store.render();
+    this.renderCalls();
+  }
+
+  setRuleEnabled(name, ruleId) {
+    const store = this.ruleStore(name);
+    const rule = store.source.get(ruleId);
+    if (!rule) {
       return;
     }
-    override.enabled = !override.enabled;
-    this.saveOverrides();
-    this.renderOverridesList();
+    rule.enabled = !rule.enabled;
+    this.commitRule(store);
     this.addEvent(
       "info",
-      `Override ${override.enabled ? "enabled" : "disabled"}: ${override.callName}`,
+      `${store.label} ${rule.enabled ? "enabled" : "disabled"}: ${rule.callName}`,
     );
     this.checkDebuggerNeeded();
   }
 
-  setOverrideScope(key, scope) {
-    const override = this.overrides.get(key);
-    if (!override) {
+  setRuleDeleted(name, ruleId, deleted) {
+    const store = this.ruleStore(name);
+    const rule = store.source.get(ruleId);
+    if (!rule) {
       return;
     }
-    override.scope = scope;
-    if (scope === "site") {
-      override.scopeOrigin = this.currentOrigin;
-    } else {
-      delete override.scopeOrigin;
+    rule.deleted = deleted;
+    if (deleted) {
+      this.collapseRule(store, ruleId);
     }
-    this.saveOverrides();
-    this.renderOverridesList();
+    this.commitRule(store);
     this.addEvent(
       "info",
-      `Override scope changed to ${scope === "global" ? "All Sites" : "This Site"}`,
+      `${deleted ? "Deleted" : "Restored"} ${store.label.toLowerCase()}: ${rule.callName}`,
     );
   }
 
-  deleteOverride(key) {
-    const override = this.overrides.get(key);
-    if (!override) {
+  purgeRule(name, ruleId) {
+    const store = this.ruleStore(name);
+    const rule = store.source.get(ruleId);
+    if (!rule) {
       return;
     }
-    override.deleted = true;
-    this.saveOverrides();
-    if (this.expandedOverride === key) {
-      this.expandedOverride = null;
-    }
-    this.renderOverridesList();
-    this.renderCalls();
-    this.addEvent("info", `Deleted override: ${override.callName}`);
-  }
-
-  restoreOverride(key) {
-    const override = this.overrides.get(key);
-    if (!override) {
-      return;
-    }
-    override.deleted = false;
-    this.saveOverrides();
-    this.renderOverridesList();
-    this.renderCalls();
-    this.addEvent("info", `Restored override: ${override.callName}`);
-  }
-
-  permanentlyDeleteOverride(key) {
-    const override = this.overrides.get(key);
-    if (!override) {
-      return;
-    }
-    this.overrides.delete(key);
-    this.saveOverrides();
-    if (this.expandedOverride === key) {
-      this.expandedOverride = null;
-    }
-    this.renderOverridesList();
-    this.renderCalls();
-    this.addEvent("info", `Permanently deleted override: ${override.callName}`);
-
+    store.source.delete(ruleId);
+    this.collapseRule(store, ruleId);
+    this.commitRule(store);
+    this.addEvent(
+      "info",
+      `Permanently deleted ${store.label.toLowerCase()}: ${rule.callName}`,
+    );
     this.checkDebuggerNeeded();
+  }
+
+  setRuleScope(name, ruleId, scope) {
+    const store = this.ruleStore(name);
+    const rule = store.source.get(ruleId);
+    if (!rule) {
+      return;
+    }
+    if (!this.applyRuleScope(store.source, ruleId, rule, scope)) {
+      store.render();
+      return;
+    }
+    if (this[store.expandedField] === ruleId) {
+      this[store.expandedField] = this.ruleId(rule);
+    }
+    store.save();
+    store.render();
+    this.addEvent(
+      "info",
+      `${store.label} scope changed to ${scope === "global" ? "All Sites" : "This Site"}`,
+    );
   }
 
   createOrEditDelay(callKey) {
@@ -2884,12 +3054,12 @@ class NetworkWizardPanel {
     );
 
     if (existing) {
-      this.expandedDelay = existing.key;
+      this.expandedDelay = this.ruleId(existing);
       this.switchView("delays");
       return;
     }
 
-    this.delays.set(callKey, {
+    const entry = this.setRule(this.delays, {
       key: callKey,
       type: call.type,
       callName: call.callName,
@@ -2907,7 +3077,7 @@ class NetworkWizardPanel {
       })
       .catch(() => {});
 
-    this.expandedDelay = callKey;
+    this.expandedDelay = this.ruleId(entry);
     this.switchView("delays");
   }
 
@@ -2915,7 +3085,7 @@ class NetworkWizardPanel {
     const delays = Array.from(this.delays.entries());
 
     if (delays.length === 0) {
-      this.elements.delaysList.innerHTML = "";
+      this.elements.delaysList.innerHTML = this.renderScopeFilterToolbar();
       this.elements.delaysEmptyState.style.display = "flex";
       return;
     }
@@ -2934,7 +3104,7 @@ class NetworkWizardPanel {
         const isExpanded = this.expandedDelay === key && !delay.deleted;
         const isDeleted = delay.deleted === true;
         const badgeClass = delay.type === "GQL" ? "badge-gql" : "badge-rest";
-        const isWildcard = this.isWildcardKey(key);
+        const isWildcard = this.isWildcardKey(delay.key);
         const wildcardBadge = isWildcard
           ? '<span class="badge badge-wildcard">All Vars</span>'
           : "";
@@ -3038,23 +3208,9 @@ class NetworkWizardPanel {
   handleDelaysListClick(e) {
     const btn = e.target.closest("button[data-action]");
     if (btn) {
-      const action = btn.dataset.action;
-      const key = btn.dataset.key;
-
-      if (action === "toggle-enabled") {
-        this.toggleDelayEnabled(key);
-      } else if (action === "delete") {
-        this.deleteDelay(key);
-      } else if (action === "restore") {
-        this.restoreDelay(key);
-      } else if (action === "permanent-delete") {
-        this.permanentlyDeleteDelay(key);
-      } else if (action === "set-timing") {
-        this.setDelayTiming(key, btn.dataset.timing === "before");
-      } else if (action === "set-delay-scope") {
-        this.setDelayScope(key, btn.dataset.scope);
-      } else if (action === "set-scope-filter") {
-        this.setScopeFilter(btn.dataset.filter);
+      const action = DELAY_ACTIONS[btn.dataset.action];
+      if (action) {
+        action(this, btn.dataset.key, btn.dataset);
       }
       return;
     }
@@ -3087,22 +3243,6 @@ class NetworkWizardPanel {
     }
   }
 
-  toggleDelayEnabled(key) {
-    const delay = this.delays.get(key);
-    if (!delay) {
-      return;
-    }
-    delay.enabled = !delay.enabled;
-    this.saveDelays();
-    this.renderDelaysList();
-    this.renderCalls();
-    this.addEvent(
-      "info",
-      `Delay ${delay.enabled ? "enabled" : "disabled"}: ${delay.callName}`,
-    );
-    this.checkDebuggerNeeded();
-  }
-
   setDelayTiming(key, delayBefore) {
     const delay = this.delays.get(key);
     if (!delay) {
@@ -3112,69 +3252,6 @@ class NetworkWizardPanel {
     this.saveDelays();
     this.renderDelaysList();
     this.renderCalls();
-  }
-
-  setDelayScope(key, scope) {
-    const delay = this.delays.get(key);
-    if (!delay) {
-      return;
-    }
-    delay.scope = scope;
-    if (scope === "site") {
-      delay.scopeOrigin = this.currentOrigin;
-    } else {
-      delete delay.scopeOrigin;
-    }
-    this.saveDelays();
-    this.renderDelaysList();
-    this.addEvent(
-      "info",
-      `Delay scope changed to ${scope === "global" ? "All Sites" : "This Site"}`,
-    );
-  }
-
-  deleteDelay(key) {
-    const delay = this.delays.get(key);
-    if (!delay) {
-      return;
-    }
-    delay.deleted = true;
-    this.saveDelays();
-    if (this.expandedDelay === key) {
-      this.expandedDelay = null;
-    }
-    this.renderDelaysList();
-    this.renderCalls();
-    this.addEvent("info", `Deleted delay: ${delay.callName}`);
-  }
-
-  restoreDelay(key) {
-    const delay = this.delays.get(key);
-    if (!delay) {
-      return;
-    }
-    delay.deleted = false;
-    this.saveDelays();
-    this.renderDelaysList();
-    this.renderCalls();
-    this.addEvent("info", `Restored delay: ${delay.callName}`);
-  }
-
-  permanentlyDeleteDelay(key) {
-    const delay = this.delays.get(key);
-    if (!delay) {
-      return;
-    }
-    this.delays.delete(key);
-    this.saveDelays();
-    if (this.expandedDelay === key) {
-      this.expandedDelay = null;
-    }
-    this.renderDelaysList();
-    this.renderCalls();
-    this.addEvent("info", `Permanently deleted delay: ${delay.callName}`);
-
-    this.checkDebuggerNeeded();
   }
 
   checkDebuggerNeeded() {
@@ -3389,6 +3466,36 @@ class NetworkWizardPanel {
     return `${base}:${hash}`;
   }
 
+  ruleScope(entry) {
+    return entry.scope === "global" ? "global" : "site";
+  }
+
+  ruleId(entry) {
+    return `${this.ruleScope(entry)}|${entry.key}`;
+  }
+
+  setRule(source, entry) {
+    source.set(this.ruleId(entry), entry);
+    return entry;
+  }
+
+  rekeyRule(source, previousId, entry) {
+    source.delete(previousId);
+    source.set(this.ruleId(entry), entry);
+    return this.ruleId(entry);
+  }
+
+  getRule(source, callKey, scope) {
+    return source.get(`${scope}|${callKey}`) || null;
+  }
+
+  ownRule(source, callKey) {
+    return (
+      this.getRule(source, callKey, "site") ||
+      this.getRule(source, callKey, "global")
+    );
+  }
+
   getBaseKey(callKey) {
     const lastColon = callKey.lastIndexOf(":");
     if (lastColon === -1) {
@@ -3431,10 +3538,7 @@ class NetworkWizardPanel {
     }
 
     this.elements.emptyState.style.display = "none";
-    this.elements.networkBody.insertAdjacentHTML(
-      "beforeend",
-      this.renderCallRow(key, call),
-    );
+    this.elements.networkBody.appendChild(this.createCallRowElement(key, call));
     this.refreshCallCount();
   }
 
@@ -3452,15 +3556,7 @@ class NetworkWizardPanel {
     }
 
     if (!call || !this.matchesFilter(call)) {
-      const detailRow = existingRow.nextElementSibling;
-      if (detailRow && detailRow.classList.contains("call-details")) {
-        this.cleanupDetailRowEditors(key);
-        detailRow.remove();
-      }
-      existingRow.remove();
-      if (this.expandedCall === key) {
-        this.expandedCall = null;
-      }
+      this.discardCallRow(existingRow, key);
       if (this.elements.networkBody.children.length === 0) {
         this.elements.emptyState.style.display = "flex";
       }
@@ -3468,14 +3564,124 @@ class NetworkWizardPanel {
       return;
     }
 
-    const template = document.createElement("template");
-    template.innerHTML = this.renderCallRow(key, call).trim();
-    existingRow.replaceWith(template.content.firstChild);
+    const row = this.refreshCallRowElement(existingRow, key, call);
+    if (this.syncDetailRow(row, key, call)) {
+      this.initNetworkJsonEditors();
+    }
     this.refreshCallCount();
   }
 
-  cleanupDetailRowEditors(callKey) {
-    const fields = ["requestBody", "responseBodyView", "requestBodyOverride"];
+  elementFromHtml(html) {
+    const template = document.createElement("template");
+    template.innerHTML = html.trim();
+    return template.content.firstChild;
+  }
+
+  detailRowFor(row) {
+    const next = row.nextElementSibling;
+    return next && next.classList.contains("call-details") ? next : null;
+  }
+
+  createCallRowElement(key, call) {
+    const html = this.renderCallRow(key, call);
+    this.callRowHtml.set(key, html);
+    return this.elementFromHtml(html);
+  }
+
+  createDetailRowElement(key, call) {
+    return this.elementFromHtml(
+      `<tr class="call-details visible"><td colspan="5">${this.renderCallDetails(call, key)}</td></tr>`,
+    );
+  }
+
+  refreshCallRowElement(row, key, call) {
+    const html = this.renderCallRow(key, call);
+    if (this.callRowHtml.get(key) === html) {
+      return row;
+    }
+
+    const replacement = this.elementFromHtml(html);
+    this.callRowHtml.set(key, html);
+    row.replaceWith(replacement);
+    return replacement;
+  }
+
+  discardCallRow(row, key) {
+    const details = this.detailRowFor(row);
+    if (details) {
+      details.remove();
+    }
+    this.cleanupDetailRowEditors(key);
+    this.callRowHtml.delete(key);
+    row.remove();
+  }
+
+  syncDetailRow(row, key, call) {
+    const details = this.detailRowFor(row);
+    const wanted = this.expandedCall === key && !call.pending;
+
+    if (!wanted) {
+      if (details) {
+        this.cleanupDetailRowEditors(key);
+        details.remove();
+      }
+      return null;
+    }
+
+    if (!details) {
+      const created = this.createDetailRowElement(key, call);
+      this.elements.networkBody.insertBefore(created, row.nextSibling);
+      return created;
+    }
+
+    this.patchDetailRow(details, key, call);
+    return details;
+  }
+
+  patchDetailRow(details, key, call) {
+    const generalBody = details.querySelector("[data-general-body]");
+    if (generalBody) {
+      generalBody.innerHTML = this.renderGeneralGrid(call);
+    }
+
+    HEADER_SIDES.forEach((side) => {
+      const tableId = `${key}-${side}`;
+      const headersBody = details.querySelector(
+        `[data-headers-body="${CSS.escape(tableId)}"]`,
+      );
+      if (headersBody) {
+        headersBody.innerHTML = this.renderHeaders(
+          this.callHeaders(call, side),
+          tableId,
+        );
+      }
+    });
+
+    this.patchRequestPanel(details, key);
+  }
+
+  patchRequestPanel(details, key) {
+    const panel = details.querySelector('.details-panel[data-panel="request"]');
+    if (!panel) {
+      return;
+    }
+
+    const wantsComparison = this.activeRequestOverride(key) !== null;
+    const showsComparison = panel.querySelector(".request-comparison") !== null;
+    if (wantsComparison === showsComparison) {
+      return;
+    }
+
+    this.cleanupDetailRowEditors(key, REQUEST_EDITOR_FIELDS);
+    panel.innerHTML = this.renderRequestPanel(key);
+
+    const tab = details.querySelector('.details-tab[data-tab="request"]');
+    if (tab) {
+      tab.innerHTML = this.renderRequestTabLabel(key);
+    }
+  }
+
+  cleanupDetailRowEditors(callKey, fields = DETAIL_EDITOR_FIELDS) {
     fields.forEach((field) => {
       const editorKey = `${callKey}-${field}`;
       const editor = this.jsonEditors.get(editorKey);
@@ -3499,87 +3705,64 @@ class NetworkWizardPanel {
     }
   }
 
-  renderCalls() {
-    const { networkBody, emptyState } = this.elements;
-    const filtered = this.getFilteredCalls();
-    const total = this.calls.size;
+  clearCallRows() {
+    const body = this.elements.networkBody;
+    body.querySelectorAll("tr.call-row").forEach((row) => {
+      this.cleanupDetailRowEditors(row.dataset.callKey);
+    });
+    this.callRowHtml.clear();
+    body.innerHTML = "";
+  }
 
-    this.updateCallCount(filtered.length, total);
+  syncCallRows(filtered) {
+    const body = this.elements.networkBody;
+    const wanted = new Set(filtered.map(([key]) => key));
+    const existing = new Map();
+
+    Array.from(body.querySelectorAll("tr.call-row")).forEach((row) => {
+      const key = row.dataset.callKey;
+      if (wanted.has(key)) {
+        existing.set(key, row);
+        return;
+      }
+      this.discardCallRow(row, key);
+    });
+
+    let anchor = null;
+
+    filtered.forEach(([key, call]) => {
+      const found = existing.get(key);
+      const row = found
+        ? this.refreshCallRowElement(found, key, call)
+        : this.createCallRowElement(key, call);
+
+      const target = anchor ? anchor.nextElementSibling : body.firstElementChild;
+      if (target !== row) {
+        const details = this.detailRowFor(row);
+        body.insertBefore(row, target);
+        if (details) {
+          body.insertBefore(details, row.nextSibling);
+        }
+      }
+
+      anchor = this.syncDetailRow(row, key, call) || row;
+    });
+  }
+
+  renderCalls() {
+    const { emptyState } = this.elements;
+    const filtered = this.getFilteredCalls();
+
+    this.updateCallCount(filtered.length, this.calls.size);
 
     if (filtered.length === 0) {
-      networkBody.innerHTML = "";
+      this.clearCallRows();
       emptyState.style.display = "flex";
       return;
     }
 
     emptyState.style.display = "none";
-
-    const expandedCallInFiltered =
-      this.expandedCall && filtered.some(([key]) => key === this.expandedCall);
-    let preservedDetailRow = null;
-    let preservedCallKey = null;
-    let focusedElement = null;
-    let focusSelectionStart = null;
-    let focusSelectionEnd = null;
-
-    if (expandedCallInFiltered) {
-      const existingDetailRow = networkBody.querySelector("tr.call-details");
-      if (existingDetailRow) {
-        const precedingRow = existingDetailRow.previousElementSibling;
-        const existingRowKey = precedingRow?.dataset?.callKey;
-        if (existingRowKey === this.expandedCall) {
-          preservedDetailRow = existingDetailRow;
-          preservedCallKey = existingRowKey;
-          const activeEl = document.activeElement;
-          if (activeEl && existingDetailRow.contains(activeEl)) {
-            focusedElement = activeEl;
-            if (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA") {
-              focusSelectionStart = activeEl.selectionStart;
-              focusSelectionEnd = activeEl.selectionEnd;
-            }
-          }
-        }
-        existingDetailRow.remove();
-      }
-    }
-
-    const rows = [];
-
-    filtered.forEach(([key, call]) => {
-      rows.push(this.renderCallRow(key, call));
-
-      const isExpanded = this.expandedCall === key;
-      if (isExpanded && !call.pending) {
-        if (preservedDetailRow && preservedCallKey === key) {
-          rows.push(
-            `<tr class="call-details visible" data-preserved="true"><td colspan="5"></td></tr>`,
-          );
-        } else {
-          rows.push(
-            `<tr class="call-details visible"><td colspan="5">${this.renderCallDetails(call, key)}</td></tr>`,
-          );
-        }
-      }
-    });
-
-    networkBody.innerHTML = rows.join("");
-
-    if (preservedDetailRow && preservedCallKey === this.expandedCall) {
-      const placeholder = networkBody.querySelector(
-        'tr.call-details[data-preserved="true"]',
-      );
-      if (placeholder) {
-        placeholder.replaceWith(preservedDetailRow);
-      }
-    }
-
-    if (focusedElement && focusedElement.isConnected) {
-      focusedElement.focus();
-      if (focusSelectionStart !== null) {
-        focusedElement.setSelectionRange(focusSelectionStart, focusSelectionEnd);
-      }
-    }
-
+    this.syncCallRows(filtered);
     this.initNetworkJsonEditors();
   }
 
@@ -3646,15 +3829,12 @@ class NetworkWizardPanel {
       });
 
     this.jsonEditors.forEach((editor, key) => {
-      if (
-        key.includes("-requestBody") ||
-        key.includes("-responseBodyView") ||
-        key.includes("-requestBodyOverride")
-      ) {
-        if (!activeKeys.has(key)) {
-          editor.destroy();
-          this.jsonEditors.delete(key);
-        }
+      const isDetailEditor = DETAIL_EDITOR_FIELDS.some((field) =>
+        key.endsWith(`-${field}`),
+      );
+      if (isDetailEditor && !activeKeys.has(key)) {
+        editor.destroy();
+        this.jsonEditors.delete(key);
       }
     });
   }
@@ -3721,33 +3901,62 @@ class NetworkWizardPanel {
     `;
   }
 
-  renderCallDetails(call, callKey) {
-    let reqHeaders = call.requestHeaders;
-    let resHeaders = call.responseHeaders;
-
-    if (call.entry) {
-      if (!reqHeaders || Object.keys(reqHeaders).length === 0) {
-        reqHeaders = this.headersToObject(call.entry.request?.headers);
-      }
-      if (!resHeaders || Object.keys(resHeaders).length === 0) {
-        resHeaders = this.headersToObject(call.entry.response?.headers);
-      }
+  callHeaders(call, side) {
+    const own = side === "req" ? call.requestHeaders : call.responseHeaders;
+    if ((own && Object.keys(own).length > 0) || !call.entry) {
+      return own;
     }
+    return this.headersToObject(
+      side === "req"
+        ? call.entry.request?.headers
+        : call.entry.response?.headers,
+    );
+  }
 
-    const requestHeaders = this.renderHeaders(reqHeaders, `${callKey}-req`);
-    const responseHeaders = this.renderHeaders(resHeaders, `${callKey}-res`);
-
-    const statusClass = call.hasError ? "text-error" : "text-success";
-
+  activeRequestOverride(callKey) {
     const override = this.getOverrideForCurrentSite(callKey);
-    const hasRequestOverride =
+    const active =
       override &&
       override.enabled &&
       override.requestBodyOverrideEnabled &&
       override.requestBody;
+    return active ? override : null;
+  }
 
-    const requestPanelContent = hasRequestOverride
-      ? `
+  renderGeneralGrid(call) {
+    const statusClass = call.hasError ? "text-error" : "text-success";
+    return `
+      <div class="info-grid">
+        <span class="info-label">URL</span>
+        <span class="info-value">${this.escapeHtml(call.fullUrl || "")}</span>
+        <span class="info-label">Method</span>
+        <span class="info-value">${this.escapeHtml(call.method || "")}</span>
+        <span class="info-label">Status</span>
+        <span class="info-value ${statusClass}" data-general-status>${call.status} ${this.escapeHtml(call.statusText || "")}</span>
+      </div>
+    `;
+  }
+
+  renderRequestTabLabel(callKey) {
+    const badge = this.activeRequestOverride(callKey)
+      ? ' <span class="override-badge">Override</span>'
+      : "";
+    return `Request${badge}`;
+  }
+
+  renderRequestPanel(callKey) {
+    const override = this.activeRequestOverride(callKey);
+
+    if (!override) {
+      return `
+      <div class="panel-toolbar">
+        <button class="btn btn-sm btn-secondary copy-btn" data-copy="request" data-key="${this.escapeHtml(callKey)}">Copy</button>
+      </div>
+      <div class="json-editor-container" data-field="requestBody" data-callkey="${this.escapeHtml(callKey)}" data-readonly="true"></div>
+    `;
+    }
+
+    return `
       <div class="request-comparison">
         <div class="request-comparison-side">
           <div class="request-comparison-header">
@@ -3761,49 +3970,36 @@ class NetworkWizardPanel {
             <span class="request-comparison-title overridden">Overridden Request</span>
             <button class="btn btn-sm btn-secondary copy-btn" data-copy="requestOverride" data-key="${this.escapeHtml(callKey)}">Copy</button>
           </div>
-          <div class="json-editor-container" data-field="requestBodyOverride" data-callkey="${this.escapeHtml(callKey)}" data-override-key="${this.escapeHtml(override.key)}" data-readonly="true"></div>
+          <div class="json-editor-container" data-field="requestBodyOverride" data-callkey="${this.escapeHtml(callKey)}" data-override-key="${this.escapeHtml(this.ruleId(override))}" data-readonly="true"></div>
         </div>
       </div>
-    `
-      : `
-      <div class="panel-toolbar">
-        <button class="btn btn-sm btn-secondary copy-btn" data-copy="request" data-key="${this.escapeHtml(callKey)}">Copy</button>
-      </div>
-      <div class="json-editor-container" data-field="requestBody" data-callkey="${this.escapeHtml(callKey)}" data-readonly="true"></div>
     `;
+  }
 
+  renderCallDetails(call, callKey) {
     return `
       <div class="details-content">
         <nav class="details-tabs">
           <button class="details-tab${this.activeTab === "headers" ? " active" : ""}" data-tab="headers">Headers</button>
-          <button class="details-tab${this.activeTab === "request" ? " active" : ""}" data-tab="request">Request${hasRequestOverride ? ' <span class="override-badge">Override</span>' : ""}</button>
+          <button class="details-tab${this.activeTab === "request" ? " active" : ""}" data-tab="request">${this.renderRequestTabLabel(callKey)}</button>
           <button class="details-tab${this.activeTab === "response" ? " active" : ""}" data-tab="response">Response</button>
         </nav>
         <section class="details-panel${this.activeTab === "headers" ? " active" : ""}" data-panel="headers">
           <div class="details-card">
             <div class="details-card-header">General</div>
-            <div class="details-card-body">
-              <div class="info-grid">
-                <span class="info-label">URL</span>
-                <span class="info-value">${this.escapeHtml(call.fullUrl || "")}</span>
-                <span class="info-label">Method</span>
-                <span class="info-value">${this.escapeHtml(call.method || "")}</span>
-                <span class="info-label">Status</span>
-                <span class="info-value ${statusClass}">${call.status} ${this.escapeHtml(call.statusText || "")}</span>
-              </div>
-            </div>
+            <div class="details-card-body" data-general-body>${this.renderGeneralGrid(call)}</div>
           </div>
           <div class="details-card">
             <div class="details-card-header clickable" data-table-id="${callKey}-req">Request Headers</div>
-            <div class="details-card-body">${requestHeaders}</div>
+            <div class="details-card-body" data-headers-body="${callKey}-req">${this.renderHeaders(this.callHeaders(call, "req"), `${callKey}-req`)}</div>
           </div>
           <div class="details-card">
             <div class="details-card-header clickable" data-table-id="${callKey}-res">Response Headers</div>
-            <div class="details-card-body">${responseHeaders}</div>
+            <div class="details-card-body" data-headers-body="${callKey}-res">${this.renderHeaders(this.callHeaders(call, "res"), `${callKey}-res`)}</div>
           </div>
         </section>
         <section class="details-panel${this.activeTab === "request" ? " active" : ""}" data-panel="request">
-          ${requestPanelContent}
+          ${this.renderRequestPanel(callKey)}
         </section>
         <section class="details-panel${this.activeTab === "response" ? " active" : ""}" data-panel="response">
           <div class="panel-toolbar">

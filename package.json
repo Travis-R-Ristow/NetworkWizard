@@ -1,9 +1,10 @@
 {
   "name": "networkwizard",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "description": "Chrome DevTools extension to review, block, override, and delay network calls",
   "scripts": {
-    "test": "node test/run.js"
+    "test": "node test/run.js",
+    "package": "v=$(node -p \"require('./manifest.json').version\") && out=\"../networkwizard-$v.zip\" && rm -f \"$out\" && zip -rq \"$out\" manifest.json background.js devtools.html devtools.js panel icons/icon16.png icons/icon48.png icons/icon128.png && echo \"packaged $(cd .. && pwd)/networkwizard-$v.zip\""
   }
 }

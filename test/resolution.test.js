@@ -13,7 +13,7 @@ const keyA = p.generateCallKey(true, 'GetUser', null, { id: 1 });
 const keyB = p.generateCallKey(true, 'GetUser', null, { id: 999 });
 t('different variables -> different keys', keyA !== keyB, true);
 
-p.overrides.set(keyA, {
+const globalRule = p.setRule(p.overrides, {
   key: keyA, type: 'GQL', callName: 'GetUser', enabled: true,
   scope: 'global', matchVariablesEnabled: false, matchVariables: { id: 1 },
   responseBodyOverrideEnabled: true, responseBody: '{"mock":true}',
@@ -25,32 +25,31 @@ t('match OFF applies with no variables at all', p.findMatchingOverride(keyB, nul
 t('match OFF does not leak to a different operation',
   p.findMatchingOverride(p.generateCallKey(true, 'GetOrder', null, { id: 1 }), { id: 1 }, true, true), null);
 
-p.overrides.get(keyA).scope = 'site';
-p.overrides.get(keyA).scopeOrigin = 'https://site-a.test';
+p.applyRuleScope(p.overrides, p.ruleId(globalRule), globalRule, 'site');
 t('site scope + match OFF applies to other variables', p.findMatchingOverride(keyB, { id: 999 }, true, true)?.key, keyA);
 p.currentOrigin = 'https://other.test';
 t('site scope does not apply on another origin', p.findMatchingOverride(keyB, { id: 999 }, true, true), null);
-p.overrides.get(keyA).scope = 'global';
+p.applyRuleScope(p.overrides, p.ruleId(globalRule), globalRule, 'global');
 t('global scope applies on another origin', p.findMatchingOverride(keyB, { id: 999 }, true, true)?.key, keyA);
 p.currentOrigin = 'https://site-a.test';
 
 reset();
-p.overrides.set(keyA, {
+const siteRule = p.setRule(p.overrides, {
   key: keyA, enabled: true, scope: 'site', scopeOrigin: 'https://site-a.test',
   matchVariablesEnabled: true, matchVariables: { id: 1 }, responseBodyOverrideEnabled: true,
 });
 t('match ON hits exact variables', p.findMatchingOverride(keyA, { id: 1 }, true, true)?.key, keyA);
 t('match ON misses other variables', p.findMatchingOverride(keyB, { id: 999 }, true, true), null);
 t('match ON tolerates extra request variables', p.findMatchingOverride(keyA, { id: 1, extra: 'x' }, true, true)?.key, keyA);
-p.overrides.get(keyA).matchVariables = { filter: { b: 2, a: 1 } };
+siteRule.matchVariables = { filter: { b: 2, a: 1 } };
 t('match ON compares nested objects key-order-insensitively',
   p.findMatchingOverride(keyA, { filter: { a: 1, b: 2 } }, true, true)?.key, keyA);
-p.overrides.get(keyA).matchVariables = {};
+siteRule.matchVariables = {};
 t('match ON with empty criteria matches anything', p.findMatchingOverride(keyB, { id: 5 }, true, true)?.key, keyA);
 
 reset();
 const restKey = p.generateCallKey(false, null, 'https://site-a.test/api/x', '{"a":1}');
-p.overrides.set(restKey, {
+p.setRule(p.overrides, {
   key: restKey, enabled: true, scope: 'site', scopeOrigin: 'https://site-a.test',
   matchParamsEnabled: true,
   matchParams: [{ name: 'foo', value: '1', deleted: false }],
@@ -68,30 +67,30 @@ t('POST override respects a param mismatch',
 reset();
 const legacy = p.migrateOldKey('gql:GetUser');
 t('legacy key migrates to wildcard', legacy, 'gql:GetUser:*');
-p.blockedCalls.set(legacy, { key: legacy, scope: 'site', scopeOrigin: 'https://site-a.test' });
+p.setRule(p.blockedCalls, { key: legacy, scope: 'site', scopeOrigin: 'https://site-a.test' });
 t('wildcard block matches a hashed call key', p.isBlockedForCurrentSite(keyA), true);
-t('resolveBlockedKey returns the wildcard entry', p.resolveBlockedKey(keyA), legacy);
+t("blocked lookup returns the wildcard entry", p.candidateEntries(p.blockedCalls, keyA)[0]?.key, legacy);
 p.toggleBlock(keyA);
 t('un-block from the network row removes the wildcard entry', p.blockedCalls.size, 0);
 t('row is no longer blocked', p.isBlockedForCurrentSite(keyA), false);
 
 reset();
-p.blockedCalls.set(keyA, { key: keyA, scope: 'site', scopeOrigin: 'https://site-a.test' });
-p.blockedCalls.set('gql:GetUser:*', { key: 'gql:GetUser:*', scope: 'site', scopeOrigin: 'https://site-a.test' });
-t('exact key preferred over wildcard', p.resolveBlockedKey(keyA), keyA);
-t('wildcard used when no exact entry', p.resolveBlockedKey(keyB), 'gql:GetUser:*');
+p.setRule(p.blockedCalls, { key: keyA, scope: 'site', scopeOrigin: 'https://site-a.test' });
+p.setRule(p.blockedCalls, { key: 'gql:GetUser:*', scope: 'site', scopeOrigin: 'https://site-a.test' });
+t('exact key preferred over wildcard', p.candidateEntries(p.blockedCalls, keyA)[0]?.key, keyA);
+t('wildcard used when no exact entry', p.candidateEntries(p.blockedCalls, keyB)[0]?.key, 'gql:GetUser:*');
 
 reset();
-p.delays.set(keyA, { key: keyA, enabled: false, scope: 'site', scopeOrigin: 'https://site-a.test', delayMs: 1000, delayBefore: true });
-p.delays.set('gql:GetUser:*', { key: 'gql:GetUser:*', enabled: true, scope: 'site', scopeOrigin: 'https://site-a.test', delayMs: 2000, delayBefore: true });
+p.setRule(p.delays, { key: keyA, enabled: false, scope: 'site', scopeOrigin: 'https://site-a.test', delayMs: 1000, delayBefore: true });
+p.setRule(p.delays, { key: 'gql:GetUser:*', enabled: true, scope: 'site', scopeOrigin: 'https://site-a.test', delayMs: 2000, delayBefore: true });
 t('getActiveDelay skips the disabled exact entry', p.getActiveDelay(keyA)?.delayMs, 2000);
 t('getDelayForCurrentSite returns the exact entry for the UI', p.getDelayForCurrentSite(keyA)?.delayMs, 1000);
-p.delays.get('gql:GetUser:*').deleted = true;
+p.getRule(p.delays, "gql:GetUser:*", "site").deleted = true;
 t('deleted delays are out of scope', p.getActiveDelay(keyA), null);
 
 reset();
-p.overrides.set(keyA, { key: keyA, enabled: false, scope: 'site', scopeOrigin: 'https://site-a.test', matchVariablesEnabled: false, responseBodyOverrideEnabled: true });
-p.overrides.set('gql:GetUser:*', { key: 'gql:GetUser:*', enabled: true, scope: 'site', scopeOrigin: 'https://site-a.test', matchVariablesEnabled: false, responseBodyOverrideEnabled: true });
+p.setRule(p.overrides, { key: keyA, enabled: false, scope: 'site', scopeOrigin: 'https://site-a.test', matchVariablesEnabled: false, responseBodyOverrideEnabled: true });
+p.setRule(p.overrides, { key: "gql:GetUser:*", enabled: true, scope: 'site', scopeOrigin: 'https://site-a.test', matchVariablesEnabled: false, responseBodyOverrideEnabled: true });
 t('enabledOnly skips the disabled exact override', p.findMatchingOverride(keyA, { id: 1 }, true, true)?.key, 'gql:GetUser:*');
 t('UI lookup still sees the disabled exact override', p.findMatchingOverride(keyA, { id: 1 }, true, false)?.key, keyA);
 

@@ -26,17 +26,17 @@ const settle = () => new Promise(r => setTimeout(r, 20));
 const run = async () => {
   p.loadPersistedState();
   await settle();
-  t('site A loads its own + global', Array.from(p.overrides.keys()).sort(), ['gql:Everywhere:aaaaaaaa', 'gql:OnlyA:bbbbbbbb']);
+  t('site A loads its own + global', Array.from(p.overrides.keys()).sort(), ["global|gql:Everywhere:aaaaaaaa", "site|gql:OnlyA:bbbbbbbb"]);
   t('origin recorded', p.currentOrigin, 'https://site-a.test');
 
   origin = 'https://site-b.test';
   p.loadPersistedState();
-  t('site-scoped rules are inert mid-load', p.isInScope(p.overrides.get('gql:OnlyA:bbbbbbbb')), false);
-  t('global rules still apply mid-load', p.isInScope(p.overrides.get('gql:Everywhere:aaaaaaaa')), true);
+  t('site-scoped rules are inert mid-load', p.isInScope(p.getRule(p.overrides, "gql:OnlyA:bbbbbbbb", "site")), false);
+  t('global rules still apply mid-load', p.isInScope(p.getRule(p.overrides, "gql:Everywhere:aaaaaaaa", "global")), true);
   t('saves blocked mid-load', p.storeLoaded, false);
   await settle();
-  t('after navigation, site B rules loaded', Array.from(p.overrides.keys()).sort(), ['gql:Everywhere:aaaaaaaa', 'gql:OnlyB:cccccccc']);
-  t('site A rules gone from memory', p.overrides.has('gql:OnlyA:bbbbbbbb'), false);
+  t('after navigation, site B rules loaded', Array.from(p.overrides.keys()).sort(), ["global|gql:Everywhere:aaaaaaaa", "site|gql:OnlyB:cccccccc"]);
+  t('site A rules gone from memory', p.getRule(p.overrides, "gql:OnlyA:bbbbbbbb", "site") !== null, false);
   t('origin updated', p.currentOrigin, 'https://site-b.test');
 
   p.saveOverrides();

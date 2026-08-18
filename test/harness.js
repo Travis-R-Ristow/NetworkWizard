@@ -16,16 +16,18 @@ global.chrome = {
   debugger: { attach: noop, detach: noop, sendCommand: noop, onEvent: listener, onDetach: listener },
 };
 
+const { El, createElement } = require('./dom.js');
+
 const stubEl = () => ({
   addEventListener: noop, querySelectorAll: () => [], querySelector: () => null,
   classList: { add: noop, remove: noop, toggle: noop, contains: () => false },
-  style: {}, dataset: {}, insertAdjacentHTML: noop, children: [],
+  style: {}, dataset: {}, insertAdjacentHTML: noop, appendChild: noop, children: [],
   set innerHTML(v) { this._html = v; }, get innerHTML() { return this._html || ''; },
   set textContent(v) { this._text = v; }, get textContent() { return this._text || ''; },
 });
 global.document = {
   getElementById: stubEl, querySelector: stubEl, querySelectorAll: () => [],
-  addEventListener: noop, createElement: () => stubEl(), body: stubEl(), documentElement: {},
+  addEventListener: noop, createElement, body: stubEl(), documentElement: {},
 };
 const windowListeners = new Map();
 global.window = {
@@ -43,15 +45,23 @@ const fireWindowEvent = (name) => {
   (windowListeners.get(name) || []).forEach((fn) => fn());
 };
 global.CSS = { escape: (s) => s };
-global.JsonEditor = class { constructor() {} setValue() {} destroy() {} };
+global.JsonEditor = class {
+  constructor(container) { this.container = container; }
+  setValue(v) { this.value = v; }
+  updateValue(v) { this.value = v; }
+  getValue() { return this.value || ''; }
+  destroy() { this.destroyed = true; }
+};
 
-const NetworkWizardPanel = eval(src + '; NetworkWizardPanel');
+const evaluated = eval(src + '; ({ NetworkWizardPanel, OVERRIDE_ACTIONS, DELAY_ACTIONS })');
+const { NetworkWizardPanel, OVERRIDE_ACTIONS, DELAY_ACTIONS } = evaluated;
 
 const p = new NetworkWizardPanel();
+p.elements.networkBody = new El('tbody');
 p.currentOrigin = 'https://site-a.test';
 p.storeLoaded = true;
 p.renderCalls = noop; p.renderOverridesList = noop; p.renderBlockedList = noop;
 p.renderDelaysList = noop; p.renderScopedView = noop; p.addEvent = noop;
 p.saveOverrides = noop; p.saveBlockedCalls = noop; p.saveDelays = noop;
 
-module.exports = { p, NetworkWizardPanel, fireWindowEvent };
+module.exports = { p, NetworkWizardPanel, fireWindowEvent, El, OVERRIDE_ACTIONS, DELAY_ACTIONS };

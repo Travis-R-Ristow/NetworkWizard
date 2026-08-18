@@ -16,7 +16,7 @@ A Chrome DevTools extension for monitoring, analyzing, and debugging network req
 - 🎭 **Response Override** - Mock responses with custom status, headers, and body
 - ✏️ **Request Override** - Rewrite the outgoing request body before it is sent
 - 🐢 **Request Delay** - Delay a request before it is sent, or hold its response, to test loading states and timeouts
-- 🌐 **Scoping** - Every block, override, and delay applies either to the current origin or to all sites
+- 🌐 **Scoping** - Every block, override, and delay applies either to the current origin or to all sites. A site rule and an all-sites rule can both exist for the same call; the site rule wins
 - 📥 **Import/Export** - Import and export override configurations
 
 ## 📦 Installation
@@ -69,7 +69,7 @@ If a call is already covered by an existing rule, these buttons open that rule i
 - Use the **Overrides** tab to view and manage all response overrides
 - Click any override row to expand and edit:
   - **Scope** - This site only, or all sites
-  - **Match Params/Variables** - When enabled, the override only fires for requests whose query params / GQL variables match. When **disabled, the override fires for every request to that endpoint or operation**, regardless of params or variables
+  - **Match params/variables** - The checkbox on the scope row. **On by default**: the override only fires for requests whose query params / GQL variables match the list below. Uncheck it to **ignore params entirely**, so the override fires for every request to that endpoint or operation
   - **Override Request** - Replace the outgoing request body
   - **Status** - Custom status code and text (leave empty to keep original)
   - **Response Headers** - Edit as key-value pairs or raw JSON
@@ -106,6 +106,8 @@ NetworkWizard/
 │   ├── json-editor.js # Tree/text JSON viewer & editor
 │   └── json-editor.css
 ├── test/              # Regression suites (no dependencies)
+│   ├── harness.js     # chrome.* stubs + shared panel instance
+│   └── dom.js         # Minimal DOM used by the render tests
 └── icons/             # Extension icons
 ```
 
@@ -116,9 +118,28 @@ npm test
 ```
 
 Runs every `test/*.test.js` suite in its own process against the real source files,
-with `chrome.*` and the DOM stubbed by `test/harness.js`. No dependencies, no build step.
-Covers rule resolution and scoping, request/response interception, delay timing,
-storage migration and write batching, and HTML escaping.
+with `chrome.*` stubbed by `test/harness.js` and a minimal DOM provided by
+`test/dom.js`. No dependencies, no build step.
+
+Covers rule resolution and scoping, site-vs-global precedence, rule CRUD,
+call-row and overrides-list reconciliation, action dispatch, request/response
+interception, delay timing, storage migration and write batching, and HTML escaping.
+
+## 📦 Packaging
+
+```
+npm run package
+```
+
+Builds `networkwizard-<version>.zip` **one directory above the repo**, so the
+artifact is never inside the folder being zipped. Version comes from
+`manifest.json`; keep it in step with `package.json`.
+
+The script zips an explicit allowlist — `manifest.json`, `background.js`,
+`devtools.html`, `devtools.js`, `panel/` and the three PNG icons. Everything
+else (`test/`, `package.json`, this README, `icons/icon.svg`) is dev-only and
+stays out. Don't hand-roll the zip: building it in place risks sweeping a
+previous archive into the new one.
 
 ## 🔐 Permissions
 

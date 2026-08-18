@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "NetworkWizard",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "DevTools extension to review and override network calls",
   "devtools_page": "devtools.html",
   "background": {
