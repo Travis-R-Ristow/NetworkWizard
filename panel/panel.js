@@ -1,3 +1,193 @@
+const tokenizeSearch = (input) => {
+  const tokens = [];
+  let i = 0;
+
+  while (i < input.length) {
+    if (input[i] === " " || input[i] === "\t") {
+      i++;
+      continue;
+    }
+
+    if (input[i] === "&") {
+      tokens.push({ type: "AND" });
+      i++;
+      continue;
+    }
+
+    if (input[i] === "|") {
+      tokens.push({ type: "OR" });
+      i++;
+      continue;
+    }
+
+    if (input[i] === "!") {
+      tokens.push({ type: "NOT" });
+      i++;
+      continue;
+    }
+
+    if (input[i] === "(") {
+      tokens.push({ type: "LPAREN" });
+      i++;
+      continue;
+    }
+
+    if (input[i] === ")") {
+      tokens.push({ type: "RPAREN" });
+      i++;
+      continue;
+    }
+
+    if (input[i] === '"') {
+      i++;
+      let value = "";
+      while (i < input.length && input[i] !== '"') {
+        value += input[i];
+        i++;
+      }
+      if (i < input.length) {
+        i++;
+      }
+      tokens.push({ type: "TERM", value: value.toLowerCase() });
+      continue;
+    }
+
+    let value = "";
+    while (
+      i < input.length &&
+      input[i] !== " " &&
+      input[i] !== "\t" &&
+      input[i] !== "&" &&
+      input[i] !== "|" &&
+      input[i] !== "!" &&
+      input[i] !== "(" &&
+      input[i] !== ")" &&
+      input[i] !== '"'
+    ) {
+      value += input[i];
+      i++;
+    }
+    tokens.push({ type: "TERM", value: value.toLowerCase() });
+  }
+
+  return tokens;
+};
+
+const parseSearch = (input) => {
+  if (!input || !input.trim()) {
+    return null;
+  }
+
+  const tokens = tokenizeSearch(input);
+  if (tokens.length === 0) {
+    return null;
+  }
+
+  let pos = 0;
+
+  const peek = () => (pos < tokens.length ? tokens[pos] : null);
+  const consume = () => tokens[pos++];
+
+  const hasPrimary = () => {
+    const t = peek();
+    return t && (t.type === "TERM" || t.type === "LPAREN" || t.type === "NOT");
+  };
+
+  const skipOperators = () => {
+    while (peek() && (peek().type === "OR" || peek().type === "AND")) {
+      consume();
+    }
+  };
+
+  const parseOr = () => {
+    skipOperators();
+    if (!hasPrimary()) {
+      return null;
+    }
+    let left = parseAnd();
+
+    while (peek() && peek().type === "OR") {
+      consume();
+      if (!hasPrimary()) {
+        break;
+      }
+      const right = parseAnd();
+      left = { type: "or", left, right };
+    }
+
+    return left;
+  };
+
+  const parseAnd = () => {
+    let left = parseNot();
+
+    while (hasPrimary()) {
+      if (peek().type === "AND") {
+        consume();
+        if (!hasPrimary()) {
+          break;
+        }
+      }
+      const right = parseNot();
+      left = { type: "and", left, right };
+    }
+
+    return left;
+  };
+
+  const parseNot = () => {
+    if (peek() && peek().type === "NOT") {
+      consume();
+      if (!hasPrimary()) {
+        return { type: "term", value: "" };
+      }
+      return { type: "not", operand: parseNot() };
+    }
+    return parsePrimary();
+  };
+
+  const parsePrimary = () => {
+    const t = peek();
+
+    if (!t || (t.type !== "TERM" && t.type !== "LPAREN")) {
+      return { type: "term", value: "" };
+    }
+
+    if (t.type === "LPAREN") {
+      consume();
+      const expr = parseOr();
+      if (peek() && peek().type === "RPAREN") {
+        consume();
+      }
+      return expr;
+    }
+
+    consume();
+    return { type: "term", value: t.value };
+  };
+
+  return parseOr();
+};
+
+const evalSearch = (node, text) => {
+  if (!node) {
+    return true;
+  }
+
+  switch (node.type) {
+    case "term":
+      return node.value === "" || text.includes(node.value);
+    case "and":
+      return evalSearch(node.left, text) && evalSearch(node.right, text);
+    case "or":
+      return evalSearch(node.left, text) || evalSearch(node.right, text);
+    case "not":
+      return !evalSearch(node.operand, text);
+  }
+
+  return true;
+};
+
 const WRITE_DEBOUNCE_MS = 250;
 const MAX_TRACKED_INTERCEPTS = 500;
 const HEADER_SIDES = ["req", "res"];
@@ -1924,11 +2114,16 @@ class NetworkWizardPanel {
       return false;
     }
     if (this.filters.search) {
-      const searchLower = this.filters.search.toLowerCase();
-      const matchesName = call.callName.toLowerCase().includes(searchLower);
-      const matchesUrl = call.fullUrl?.toLowerCase().includes(searchLower);
-      if (!matchesName && !matchesUrl) {
-        return false;
+      if (this.filters._searchRaw !== this.filters.search) {
+        this.filters._searchRaw = this.filters.search;
+        this.filters._searchAst = parseSearch(this.filters.search);
+      }
+      if (this.filters._searchAst) {
+        const text =
+          (call.callName + "\0" + (call.fullUrl || "")).toLowerCase();
+        if (!evalSearch(this.filters._searchAst, text)) {
+          return false;
+        }
       }
     }
     return true;
