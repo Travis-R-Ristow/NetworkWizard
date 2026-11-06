@@ -12,7 +12,7 @@ global.chrome = {
     panels: {},
   },
   runtime: { connect: () => ({ postMessage: noop, onMessage: listener, onDisconnect: listener }), lastError: null },
-  storage: { local: { get: () => Promise.resolve({}), set: noop } },
+  storage: { local: { get: () => Promise.resolve({}), set: noop, remove: noop } },
   debugger: { attach: noop, detach: noop, sendCommand: noop, onEvent: listener, onDetach: listener },
 };
 
@@ -27,7 +27,8 @@ const stubEl = () => ({
 });
 global.document = {
   getElementById: stubEl, querySelector: stubEl, querySelectorAll: () => [],
-  addEventListener: noop, createElement, body: stubEl(), documentElement: {},
+  addEventListener: noop, createElement, body: stubEl(),
+  documentElement: { style: { setProperty: noop, removeProperty: noop } },
 };
 const windowListeners = new Map();
 global.window = {

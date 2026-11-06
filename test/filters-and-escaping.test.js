@@ -79,5 +79,34 @@ const rendered = p.renderCallRow(evilKey, p.calls.get(evilKey));
 t('no attribute break-out in the row', rendered.includes('onmouseover="alert(1)"'), false);
 t('quote is entity-encoded', rendered.includes('&quot;'), true);
 
+// --- window identity (name + tint) ---
+const bodyClasses = [];
+document.body.classList.toggle = (cls, force) => bodyClasses.push([cls, force]);
+const rootStyles = [];
+document.documentElement.style.setProperty = (name, value) => rootStyles.push([name, value]);
+document.documentElement.style.removeProperty = (name) => rootStyles.push([name, null]);
+p.elements.identityName = { textContent: '' };
+p.elements.identitySwatches = { set innerHTML(v) { this._html = v; }, get innerHTML() { return this._html || ''; } };
+
+p.setIdentityName('  Checkout tab  ');
+t('name is trimmed', p.identity.name, 'Checkout tab');
+t('name shown in the chip', p.elements.identityName.textContent, 'Checkout tab');
+
+p.setIdentityName('');
+t('empty name falls back to the prompt label', p.elements.identityName.textContent, 'Name window');
+
+p.setIdentityColor('#ef4444');
+t('color stored', p.identity.color, '#ef4444');
+t('tint class applied', bodyClasses[bodyClasses.length - 1], ['tinted', true]);
+t('identity color variable set', rootStyles[rootStyles.length - 1], ['--identity-color', '#ef4444']);
+t('chosen swatch marked active', p.elements.identitySwatches.innerHTML.includes('data-color="#ef4444" style="background: #ef4444"'), true);
+t('active class on the chosen swatch', p.elements.identitySwatches.innerHTML.includes('identity-swatch active'), true);
+
+p.setIdentityColor(null);
+t('clearing removes the tint class', bodyClasses[bodyClasses.length - 1], ['tinted', false]);
+t('clearing removes the color variable', rootStyles[rootStyles.length - 1], ['--identity-color', null]);
+t('none swatch marked active', p.elements.identitySwatches.innerHTML.includes('identity-swatch-none active'), true);
+t('nothing persisted for identity', p.pendingWrites.size, 0);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

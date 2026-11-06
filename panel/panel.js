@@ -189,11 +189,24 @@ const evalSearch = (node, text) => {
 };
 
 const WRITE_DEBOUNCE_MS = 250;
+const ORIGIN_RETRY_ATTEMPTS = 5;
+const ORIGIN_RETRY_DELAY_MS = 100;
 const MAX_TRACKED_INTERCEPTS = 500;
 const HEADER_SIDES = ["req", "res"];
 const DETAIL_EDITOR_FIELDS = ["requestBody", "responseBodyView", "requestBodyOverride"];
 const REQUEST_EDITOR_FIELDS = ["requestBody", "requestBodyOverride"];
 const OVERRIDE_EDITOR_FIELDS = ["request", "response"];
+
+const IDENTITY_COLORS = [
+  "#3b82f6",
+  "#22c55e",
+  "#eab308",
+  "#f97316",
+  "#ef4444",
+  "#ec4899",
+  "#a855f7",
+  "#14b8a6",
+];
 
 const OVERRIDE_ACTIONS = {
   "toggle-enabled": (panel, key) => panel.setRuleEnabled("overrides", key),
@@ -272,6 +285,8 @@ class NetworkWizardPanel {
     this.writeTimer = null;
     this.reportedCdpErrors = new Set();
     this.missingPostDataWarnings = new Set();
+    this.siteRulesWarningShown = false;
+    this.identity = { name: "", color: null };
     this.elements = {
       clearBtn: document.getElementById("clearBtn"),
       recordToggle: document.getElementById("recordToggle"),
@@ -296,7 +311,13 @@ class NetworkWizardPanel {
       delaysList: document.getElementById("delaysList"),
       delaysEmptyState: document.getElementById("delaysEmptyState"),
       callCount: document.getElementById("callCount"),
+      identityChip: document.getElementById("identityChip"),
+      identityName: document.getElementById("identityName"),
+      identityPopover: document.getElementById("identityPopover"),
+      identityNameInput: document.getElementById("identityNameInput"),
+      identitySwatches: document.getElementById("identitySwatches"),
     };
+    this.renderIdentitySwatches();
     this.bindEvents();
     this.renderMethodFilter();
     this.connectToBackground();
@@ -308,10 +329,9 @@ class NetworkWizardPanel {
   loadPersistedState() {
     const flushed = this.flushWrites();
     this.storeLoaded = false;
-    this.currentOrigin = null;
 
     flushed
-      .then(() => this.readOrigin())
+      .then(() => this.resolveOrigin())
       .then((origin) => {
         this.currentOrigin = origin;
         return Promise.all([
@@ -373,6 +393,20 @@ class NetworkWizardPanel {
     });
   }
 
+  resolveOrigin(attempt = 0) {
+    return this.readOrigin().then((origin) => {
+      if (origin) {
+        return origin;
+      }
+      if (attempt >= ORIGIN_RETRY_ATTEMPTS) {
+        return this.currentOrigin;
+      }
+      return new Promise((resolve) =>
+        setTimeout(resolve, ORIGIN_RETRY_DELAY_MS),
+      ).then(() => this.resolveOrigin(attempt + 1));
+    });
+  }
+
   saveBlockedCalls() {
     this.saveStore("blocked", this.blockedCalls);
   }
@@ -385,16 +419,31 @@ class NetworkWizardPanel {
     }[store];
   }
 
+  siteBucketKey(keys, origin) {
+    return `${keys.site}::${origin}`;
+  }
+
   loadStore(store, normalize) {
     const keys = this.storeKeysFor(store);
+    const bucketKey = this.currentOrigin
+      ? this.siteBucketKey(keys, this.currentOrigin)
+      : null;
+    const queryKeys = [keys.site, keys.global];
+    if (bucketKey) {
+      queryKeys.push(bucketKey);
+    }
 
-    return chrome.storage.local.get([keys.site, keys.global]).then((result) => {
-      const bySite = result[keys.site] || {};
+    return chrome.storage.local.get(queryKeys).then((result) => {
+      const legacyBySite = result[keys.site] || null;
       const globalEntries = result[keys.global] || [];
-      const siteEntries =
-        (this.currentOrigin && bySite[this.currentOrigin]) || [];
+      const legacySiteEntries =
+        (legacyBySite &&
+          this.currentOrigin &&
+          legacyBySite[this.currentOrigin]) ||
+        [];
+      const siteEntries = (bucketKey && result[bucketKey]) || [];
       const target = new Map();
-      let migrated = false;
+      let migrated = Boolean(legacyBySite);
 
       const add = (raw, scope) => {
         const entry = normalize(raw, scope);
@@ -413,10 +462,41 @@ class NetworkWizardPanel {
       };
 
       globalEntries.forEach((raw) => add(raw, "global"));
+      legacySiteEntries.forEach((raw) => add(raw, "site"));
       siteEntries.forEach((raw) => add(raw, "site"));
 
-      return { entries: target, count: target.size, migrated };
+      const loaded = { entries: target, count: target.size, migrated };
+      if (legacyBySite) {
+        return this.migrateLegacySiteStore(keys, legacyBySite).then(
+          () => loaded,
+        );
+      }
+      return loaded;
     });
+  }
+
+  migrateLegacySiteStore(keys, legacyBySite) {
+    const origins = Object.keys(legacyBySite);
+    const bucketKeys = origins.map((origin) =>
+      this.siteBucketKey(keys, origin),
+    );
+
+    return chrome.storage.local
+      .get(bucketKeys)
+      .then((existing) => {
+        const payload = {};
+        origins.forEach((origin, idx) => {
+          const bucketKey = bucketKeys[idx];
+          if (!(bucketKey in existing)) {
+            payload[bucketKey] = legacyBySite[origin];
+          }
+        });
+        if (Object.keys(payload).length === 0) {
+          return undefined;
+        }
+        return chrome.storage.local.set(payload);
+      })
+      .then(() => chrome.storage.local.remove(keys.site));
   }
 
   saveStore(store, source) {
@@ -453,36 +533,47 @@ class NetworkWizardPanel {
 
   writeStore(store, source, origin) {
     const keys = this.storeKeysFor(store);
+    const globalEntries = [];
+    const siteEntries = [];
 
-    return chrome.storage.local.get([keys.site, keys.global]).then((result) => {
-      const bySite = result[keys.site] || {};
-      const globalEntries = [];
-      const siteEntries = [];
-
-      source.forEach((entry) => {
-        if (entry.scope === "global") {
-          const { scopeOrigin, ...rest } = entry;
-          globalEntries.push({ ...rest, scope: "global" });
-          return;
-        }
-        if (!entry.scopeOrigin || entry.scopeOrigin === origin) {
-          siteEntries.push({ ...entry, scope: "site", scopeOrigin: origin });
-        }
-      });
-
-      const payload = { [keys.global]: globalEntries };
-
-      if (origin) {
-        if (siteEntries.length > 0) {
-          bySite[origin] = siteEntries;
-        } else {
-          delete bySite[origin];
-        }
-        payload[keys.site] = bySite;
+    source.forEach((entry) => {
+      if (entry.scope === "global") {
+        const { scopeOrigin, ...rest } = entry;
+        globalEntries.push({ ...rest, scope: "global" });
+        return;
       }
-
-      return chrome.storage.local.set(payload);
+      if (!entry.scopeOrigin || entry.scopeOrigin === origin) {
+        siteEntries.push({ ...entry, scope: "site", scopeOrigin: origin });
+      }
     });
+
+    const payload = { [keys.global]: globalEntries };
+    const writes = [];
+
+    if (origin) {
+      const bucketKey = this.siteBucketKey(keys, origin);
+      if (siteEntries.length > 0) {
+        payload[bucketKey] = siteEntries;
+      } else {
+        writes.push(chrome.storage.local.remove(bucketKey));
+      }
+    } else if (siteEntries.length > 0) {
+      this.warnSiteRulesNotSaved();
+    }
+
+    writes.push(chrome.storage.local.set(payload));
+    return Promise.all(writes);
+  }
+
+  warnSiteRulesNotSaved() {
+    if (this.siteRulesWarningShown) {
+      return;
+    }
+    this.siteRulesWarningShown = true;
+    this.addEvent(
+      "warning",
+      "Page origin is unknown - site-scoped rules cannot be saved",
+    );
   }
 
   saveOverrides() {
@@ -593,7 +684,11 @@ class NetworkWizardPanel {
       variablesOrParams,
     );
 
-    if (this.calls.has(callKey) && !this.calls.get(callKey).pending) {
+    const existing = this.calls.get(callKey);
+    if (existing) {
+      if (existing.pending) {
+        this.pendingRequests.set(msg.requestId, callKey);
+      }
       return;
     }
 
@@ -696,6 +791,18 @@ class NetworkWizardPanel {
     );
     window.addEventListener("pagehide", () => this.flushWrites());
     window.addEventListener("beforeunload", () => this.flushWrites());
+    this.elements.identityChip.addEventListener("click", () =>
+      this.toggleIdentityPopover(),
+    );
+    this.elements.identityNameInput.addEventListener("input", (e) =>
+      this.setIdentityName(e.target.value),
+    );
+    this.elements.identitySwatches.addEventListener("click", (e) => {
+      const swatch = e.target.closest(".identity-swatch");
+      if (swatch) {
+        this.setIdentityColor(swatch.dataset.color || null);
+      }
+    });
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".kebab-menu")) {
         document
@@ -707,7 +814,54 @@ class NetworkWizardPanel {
           .querySelectorAll(".chip-add-menu.open")
           .forEach((m) => m.classList.remove("open"));
       }
+      if (!e.target.closest(".window-identity")) {
+        this.elements.identityPopover.classList.add("hidden");
+      }
     });
+  }
+
+  renderIdentitySwatches() {
+    const swatches = IDENTITY_COLORS.map(
+      (color) =>
+        `<button class="identity-swatch${this.identity.color === color ? " active" : ""}" data-color="${color}" style="background: ${color}" title="${color}"></button>`,
+    );
+    swatches.push(
+      `<button class="identity-swatch identity-swatch-none${this.identity.color === null ? " active" : ""}" title="No color"></button>`,
+    );
+    this.elements.identitySwatches.innerHTML = swatches.join("");
+  }
+
+  toggleIdentityPopover() {
+    const popover = this.elements.identityPopover;
+    const opening = popover.classList.contains("hidden");
+    popover.classList.toggle("hidden");
+    if (opening) {
+      this.elements.identityNameInput.focus();
+    }
+  }
+
+  setIdentityName(name) {
+    this.identity.name = name.trim();
+    this.applyIdentity();
+  }
+
+  setIdentityColor(color) {
+    this.identity.color = color;
+    this.renderIdentitySwatches();
+    this.applyIdentity();
+  }
+
+  applyIdentity() {
+    const { name, color } = this.identity;
+
+    this.elements.identityName.textContent = name || "Name window";
+    document.body.classList.toggle("tinted", color !== null);
+
+    if (color) {
+      document.documentElement.style.setProperty("--identity-color", color);
+    } else {
+      document.documentElement.style.removeProperty("--identity-color");
+    }
   }
 
   handleHeaderTabClick(e) {
@@ -936,7 +1090,10 @@ class NetworkWizardPanel {
     const overrides = Array.from(this.overrides.entries());
 
     if (overrides.length === 0) {
-      this.elements.overridesList.innerHTML = this.renderScopeFilterToolbar();
+      this.elements.overridesList.innerHTML = `
+        ${this.renderScopeFilterToolbar()}
+        ${this.renderOverridesToolbar()}
+      `;
       this.elements.overridesEmptyState.style.display = "flex";
       this.overrideRowHtml.clear();
       return;
@@ -960,10 +1117,7 @@ class NetworkWizardPanel {
 
     list.innerHTML = `
       ${this.renderScopeFilterToolbar()}
-      <div class="overrides-toolbar">
-        <button class="btn btn-sm btn-secondary" data-action="import-full">Import Override</button>
-        <button class="btn btn-sm btn-secondary" data-action="export-all">Export All</button>
-      </div>
+      ${this.renderOverridesToolbar()}
       <table class="table">
         <thead>
           <tr>
@@ -979,6 +1133,15 @@ class NetworkWizardPanel {
 
     this.overrideRowHtml.clear();
     return list.querySelector("[data-overrides-body]");
+  }
+
+  renderOverridesToolbar() {
+    return `
+      <div class="overrides-toolbar">
+        <button class="btn btn-sm btn-secondary" data-action="import-full">Import Override</button>
+        <button class="btn btn-sm btn-secondary" data-action="export-all">Export All</button>
+      </div>
+    `;
   }
 
   refreshScopeFilter(container) {
@@ -1679,7 +1842,7 @@ class NetworkWizardPanel {
     const field = target.dataset.field;
 
     if (field === "statusCode") {
-      override.statusCode = target.value ? parseInt(target.value) : null;
+      override.statusCode = this.validStatusCode(target.value);
       this.saveOverrides();
     } else if (field === "statusText") {
       override.statusText = target.value || null;
@@ -1930,13 +2093,10 @@ class NetworkWizardPanel {
           });
 
           if (imported > 0) {
-            this.attachDebugger()
-              .then(() => {
-                this.saveOverrides();
-                this.renderOverridesList();
-                this.addEvent("success", `Imported ${imported} override(s)`);
-              })
-              .catch(() => {});
+            this.saveOverrides();
+            this.renderOverridesList();
+            this.addEvent("success", `Imported ${imported} override(s)`);
+            this.attachDebugger().catch(() => {});
           } else {
             this.addEvent("error", "No valid overrides found in file");
           }
@@ -2806,7 +2966,7 @@ class NetworkWizardPanel {
     if (own && !own.deleted) {
       return own;
     }
-    return appliedRule || own || null;
+    return appliedRule || null;
   }
 
   getOverrideForCurrentSite(callKey) {
@@ -3034,19 +3194,17 @@ class NetworkWizardPanel {
   }
 
   addBlock(callKey, template = null) {
-    return this.attachDebugger()
-      .then(() => {
-        this.setRule(
-          this.blockedCalls,
-          template
-            ? { ...template, key: callKey }
-            : { key: callKey, scope: "site", scopeOrigin: this.currentOrigin },
-        );
-        this.addEvent("success", `Blocking: ${callKey}`);
-        this.saveBlockedCalls();
-        this.renderCalls();
-      })
-      .catch(() => {});
+    this.setRule(
+      this.blockedCalls,
+      template
+        ? { ...template, key: callKey }
+        : { key: callKey, scope: "site", scopeOrigin: this.currentOrigin },
+    );
+    this.addEvent("success", `Blocking: ${callKey}`);
+    this.saveBlockedCalls();
+    this.renderCalls();
+    this.attachDebugger().catch(() => {});
+    return Promise.resolve();
   }
 
   createOrEditOverride(callKey) {
@@ -3115,12 +3273,9 @@ class NetworkWizardPanel {
       responseBody: this.formatJsonString(call.responseBody),
     });
 
-    this.attachDebugger()
-      .then(() => {
-        this.saveOverrides();
-        this.addEvent("success", `Created override for: ${call.callName}`);
-      })
-      .catch(() => {});
+    this.saveOverrides();
+    this.addEvent("success", `Created override for: ${call.callName}`);
+    this.attachDebugger().catch(() => {});
 
     this.expandedOverride = this.ruleId(entry);
     this.switchView("overrides");
@@ -3265,12 +3420,9 @@ class NetworkWizardPanel {
       delayBefore: true,
     });
 
-    this.attachDebugger()
-      .then(() => {
-        this.saveDelays();
-        this.addEvent("success", `Created delay for: ${call.callName}`);
-      })
-      .catch(() => {});
+    this.saveDelays();
+    this.addEvent("success", `Created delay for: ${call.callName}`);
+    this.attachDebugger().catch(() => {});
 
     this.expandedDelay = this.ruleId(entry);
     this.switchView("delays");
@@ -3725,9 +3877,15 @@ class NetworkWizardPanel {
     return baseKey.replace(/^(gql:|rest:)/, "");
   }
 
+  callRowElement(key) {
+    return this.elements.networkBody.querySelector(
+      `tr.call-row[data-call-key="${CSS.escape(key)}"]`,
+    );
+  }
+
   appendCallRow(key) {
     const call = this.calls.get(key);
-    if (!call || !this.matchesFilter(call)) {
+    if (!call || !this.matchesFilter(call) || this.callRowElement(key)) {
       this.refreshCallCount();
       return;
     }
@@ -3739,9 +3897,7 @@ class NetworkWizardPanel {
 
   updateCallRow(key) {
     const call = this.calls.get(key);
-    const existingRow = this.elements.networkBody.querySelector(
-      `tr.call-row[data-call-key="${CSS.escape(key)}"]`,
-    );
+    const existingRow = this.callRowElement(key);
 
     if (!existingRow) {
       if (call && this.matchesFilter(call)) {
@@ -3916,7 +4072,7 @@ class NetworkWizardPanel {
 
     Array.from(body.querySelectorAll("tr.call-row")).forEach((row) => {
       const key = row.dataset.callKey;
-      if (wanted.has(key)) {
+      if (wanted.has(key) && !existing.has(key)) {
         existing.set(key, row);
         return;
       }

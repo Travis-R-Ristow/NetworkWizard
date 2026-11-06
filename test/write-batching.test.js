@@ -20,6 +20,12 @@ chrome.storage.local.set = (payload) => {
   Object.assign(store, JSON.parse(JSON.stringify(payload)));
   return Promise.resolve();
 };
+chrome.storage.local.remove = (keys) => {
+  (Array.isArray(keys) ? keys : [keys]).forEach((k) => delete store[k]);
+  return Promise.resolve();
+};
+
+const SITE_A_BUCKET = 'overrides::https://site-a.test';
 
 p.saveOverrides = function () { this.saveStore('overrides', this.overrides); };
 p.saveDelays = function () { this.saveStore('delays', this.delays); };
@@ -43,8 +49,8 @@ const run = async () => {
   t('50 keystrokes coalesce into one queued write', p.pendingWrites.size, 1);
   await p.flushWrites();
   t('flush performs exactly one write', setCount, 1);
-  t('flush performs exactly one read', getCount, 1);
-  t('the last edit is the one persisted', store.overrides['https://site-a.test'][0].responseBody, '{"n":49}');
+  t('flush performs no reads', getCount, 0);
+  t('the last edit is the one persisted', store[SITE_A_BUCKET][0].responseBody, '{"n":49}');
   t('queue drained after flush', p.pendingWrites.size, 0);
 
   reset();
@@ -54,7 +60,7 @@ const run = async () => {
   p.saveDelays();
   t('two stores queue two writes', p.pendingWrites.size, 2);
   await p.flushWrites();
-  t('both stores written', [Boolean(store.overrides), Boolean(store.delays)], [true, true]);
+  t('both stores written', [Boolean(store[SITE_A_BUCKET]), Boolean(store['delays::https://site-a.test'])], [true, true]);
 
   reset();
   p.overrides.set('gql:D:dddddddd', site('gql:D:dddddddd'));
@@ -69,17 +75,16 @@ const run = async () => {
   p.saveOverrides();
   t('edit still pending', setCount, 0);
   fireWindowEvent('pagehide');
-  await new Promise((r) => setTimeout(r, 0));
-  t('pagehide flushes the pending edit', setCount, 1);
-  t('pagehide persisted the edit', store.overrides['https://site-a.test'][0].key, 'gql:E:eeeeeeee');
+  t('pagehide issues the write synchronously', setCount, 1);
+  t('pagehide persisted the edit', store[SITE_A_BUCKET][0].key, 'gql:E:eeeeeeee');
 
   reset();
   p.overrides.set('gql:F:ffffffff', site('gql:F:ffffffff'));
   p.saveOverrides();
   p.currentOrigin = 'https://site-b.test';
   await p.flushWrites();
-  t('write lands under the origin it was queued for', Object.keys(store.overrides), ['https://site-a.test']);
-  t('write does not leak into the new origin', 'https://site-b.test' in store.overrides, false);
+  t('write lands under the origin it was queued for', store[SITE_A_BUCKET].map((x) => x.key), ['gql:F:ffffffff']);
+  t('write does not leak into the new origin', 'overrides::https://site-b.test' in store, false);
   p.currentOrigin = 'https://site-a.test';
 
   reset();

@@ -189,5 +189,47 @@ t('header card picks up headers that arrive late', reqHeaders().includes('X-Trac
 t('panel row survived every patch', p.elements.networkBody.children[2] === panelDetail, true);
 
 
+// --- duplicate in-flight requests share one row ---
+seed();
+p.renderCalls();
+p.pendingRequests.clear();
+const start = (requestId) => p.addPendingRequest({
+  requestId, url: 'https://site-a.test/dup', method: 'GET', bodyText: null, timestamp: 1,
+});
+start('r1');
+const dupKey = rowKeys().find((k) => k.startsWith('rest:https://site-a.test/dup'));
+start('r2');
+t('second in-flight request adds no second row',
+  rowKeys().filter((k) => k === dupKey).length, 1);
+t('both request ids resolve to the same row', [p.pendingRequests.get('r1'), p.pendingRequests.get('r2')], [dupKey, dupKey]);
+p.completePendingRequest('r1', 200);
+t('first completion resolves the shared row', p.calls.get(dupKey).status, 200);
+t('completed request not re-marked pending by a late start', (start('r3'), p.calls.get(dupKey).pending), false);
+t('late start adds no row either', rowKeys().filter((k) => k === dupKey).length, 1);
+
+// --- appendCallRow is idempotent ---
+seed();
+p.renderCalls();
+p.appendCallRow('rest:alpha:aaaaaaaa');
+t('appending an already-rendered key adds no row',
+  rowKeys(), ['rest:alpha:aaaaaaaa', 'rest:beta:aaaaaaaa', 'rest:gamma:aaaaaaaa']);
+
+// --- renderCalls heals duplicate rows ---
+seed();
+p.renderCalls();
+body.appendChild(p.elementFromHtml(p.renderCallRow('rest:alpha:aaaaaaaa', p.calls.get('rest:alpha:aaaaaaaa'))));
+t('duplicate row planted', rowKeys().filter((k) => k === 'rest:alpha:aaaaaaaa').length, 2);
+p.renderCalls();
+t('re-render removes the duplicate', rowKeys().filter((k) => k === 'rest:alpha:aaaaaaaa').length, 1);
+t('other rows untouched by healing', rowKeys(), ['rest:alpha:aaaaaaaa', 'rest:beta:aaaaaaaa', 'rest:gamma:aaaaaaaa']);
+
+p.expandedCall = 'rest:alpha:aaaaaaaa';
+body.appendChild(p.elementFromHtml(p.renderCallRow('rest:alpha:aaaaaaaa', p.calls.get('rest:alpha:aaaaaaaa'))));
+p.renderCalls();
+t('healed row expands exactly once', layout(), ['rest:alpha:aaaaaaaa', 'details', 'rest:beta:aaaaaaaa', 'rest:gamma:aaaaaaaa']);
+p.expandedCall = null;
+p.renderCalls();
+t('healed row collapses cleanly', layout(), ['rest:alpha:aaaaaaaa', 'rest:beta:aaaaaaaa', 'rest:gamma:aaaaaaaa']);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

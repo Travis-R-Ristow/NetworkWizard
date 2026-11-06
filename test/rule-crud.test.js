@@ -86,6 +86,26 @@ t('purged delay is gone from the map', p.delays.size, 0);
 t('purging a delay collapses it', p.expandedDelay, null);
 t('purging a delay re-checks the debugger', debuggerChecks, 1);
 
+// --- recreating a soft-deleted rule replaces the trashed entry ---
+o = seedOverride();
+id = p.ruleId(o);
+p.attachDebugger = () => Promise.resolve();
+p.calls.set(key, { type: 'GQL', callName: 'GetUser', fullUrl: 'https://api.test/graphql', requestBody: null, responseHeaders: {}, status: 200 });
+p.setRuleDeleted("overrides", id, true);
+p.createOrEditOverride(key);
+t('override button replaces a trashed rule with a fresh one', p.overrides.get(id).deleted, undefined);
+t('fresh override is expanded', p.expandedOverride, id);
+t('no duplicate override created', p.overrides.size, 1);
+
+d = seedDelay();
+did = p.ruleId(d);
+p.setRuleDeleted("delays", did, true);
+p.createOrEditDelay(key);
+t('delay button replaces a trashed rule with a fresh one', p.delays.get(did).deleted, undefined);
+t('fresh delay is expanded', p.expandedDelay, did);
+t('no duplicate delay created', p.delays.size, 1);
+p.calls.delete(key);
+
 // --- unknown ids are inert ---
 t('toggling an unknown override is a no-op', p.setRuleEnabled("overrides", 'site|nope'), undefined);
 t('deleting an unknown delay is a no-op', p.setRuleDeleted("delays", 'site|nope', true), undefined);

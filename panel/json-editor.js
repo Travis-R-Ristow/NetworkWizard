@@ -255,6 +255,10 @@ class JsonEditor {
   }
 
   parseInputValue(inputValue, originalType) {
+    if (originalType === 'string') {
+      return inputValue;
+    }
+
     const trimmed = inputValue.trim();
 
     if (trimmed === 'null') {
@@ -268,7 +272,7 @@ class JsonEditor {
     }
 
     const num = Number(trimmed);
-    if (!isNaN(num) && trimmed !== '' && originalType === 'number') {
+    if (!isNaN(num) && trimmed !== '') {
       return num;
     }
 
@@ -330,7 +334,7 @@ class JsonEditor {
   }
 
   handleTextKeydown(e) {
-    if (e.key === 'Tab') {
+    if (e.key === 'Tab' && !this.options.readOnly) {
       e.preventDefault();
       const start = this.elements.textView.selectionStart;
       const end = this.elements.textView.selectionEnd;

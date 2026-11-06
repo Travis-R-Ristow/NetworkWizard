@@ -5,11 +5,12 @@ const ATTR = /([\w-]+)(?:=(?:"([^"]*)"|'([^']*)'))?/g;
 const camel = (name) => name.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
 
 const parseSelector = (selector) => {
-  const tag = selector.match(/^([a-z]+)/i);
-  const classes = Array.from(selector.matchAll(/\.([\w-]+)/g)).map((m) => m[1]);
   const attrs = Array.from(selector.matchAll(/\[([\w-]+)(?:="([^"]*)")?\]/g)).map(
     (m) => ({ name: m[1], value: m[2] }),
   );
+  const rest = selector.replace(/\[[^\]]*\]/g, "");
+  const tag = rest.match(/^([a-z]+)/i);
+  const classes = Array.from(rest.matchAll(/\.([\w-]+)/g)).map((m) => m[1]);
   return { tag: tag ? tag[1].toUpperCase() : null, classes, attrs };
 };
 

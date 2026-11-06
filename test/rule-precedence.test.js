@@ -93,8 +93,8 @@ Promise.resolve(p.toggleBlockEntry(id(wildKey, "global"))).then(() => {
   t('deleted exact rule does not shadow an applicable rule',
     p.attachedRule(p.overrides, hashKey, p.getOverrideForCurrentSite(hashKey)).key, wildKey);
   p.overrides.delete(id(wildKey));
-  t('deleted rule reachable when nothing applies',
-    p.attachedRule(p.overrides, hashKey, p.getOverrideForCurrentSite(hashKey)).key, hashKey);
+  t('deleted rule is not attached to the row',
+    p.attachedRule(p.overrides, hashKey, p.getOverrideForCurrentSite(hashKey)), null);
   reset();
   p.calls.set(hashKey, { type: 'GQL', callName: 'GetUser', method: 'POST', requestBody: gqlBody, matchParams: { id: 1 } });
   p.setRule(p.overrides, site(hashKey, { enabled: true, matchVariablesEnabled: true, matchVariables: { id: 777 }, responseBodyOverrideEnabled: true }));

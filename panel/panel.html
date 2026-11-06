@@ -9,6 +9,16 @@
   <header class="panel-header">
     <div class="header-left">
       <h1 class="text-xl font-medium">NetworkWizard</h1>
+      <div class="window-identity">
+        <button class="identity-chip" id="identityChip" title="Name and color this window">
+          <span class="identity-dot"></span>
+          <span class="identity-name" id="identityName">Name window</span>
+        </button>
+        <div class="identity-popover hidden" id="identityPopover">
+          <input type="text" id="identityNameInput" class="identity-input" placeholder="Window name" maxlength="24">
+          <div class="identity-swatches" id="identitySwatches"></div>
+        </div>
+      </div>
       <nav class="header-tabs" id="headerTabs">
         <button class="header-tab active" data-view="network">Network</button>
         <button class="header-tab" data-view="blocked">Blocked</button>

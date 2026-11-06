@@ -10,6 +10,9 @@ chrome.storage.local.get = (keys) => Promise.resolve(
   Object.fromEntries(keys.filter(k => k in store).map(k => [k, JSON.parse(JSON.stringify(store[k]))]))
 );
 chrome.storage.local.set = (payload) => { Object.assign(store, JSON.parse(JSON.stringify(payload))); };
+chrome.storage.local.remove = (keys) => {
+  (Array.isArray(keys) ? keys : [keys]).forEach(k => delete store[k]);
+};
 
 p.saveOverrides = function () { this.saveStore('overrides', this.overrides); };
 p.saveBlockedCalls = function () { this.saveStore('blocked', this.blockedCalls); };
@@ -19,7 +22,10 @@ const run = async () => {
   store = {
     blockedCalls: { 'https://site-a.test': ['gql:OldBlock'] },
     blockedCallsGlobal: ['rest:https://api.test/legacy'],
-    overrides: { 'https://site-a.test': [{ key: 'gql:OldOverride', callName: 'OldOverride', type: 'GQL' }] },
+    overrides: {
+      'https://site-a.test': [{ key: 'gql:OldOverride', callName: 'OldOverride', type: 'GQL' }],
+      'https://site-c.test': [{ key: 'gql:OtherSite', callName: 'OtherSite', type: 'GQL' }],
+    },
     overridesGlobal: [{ key: 'gql:GlobalOverride:aaaaaaaa', callName: 'G', type: 'GQL', enabled: true, responseBodyOverrideEnabled: true }],
     delays: { 'https://site-a.test': [{ key: 'gql:OldDelay', callName: 'D', type: 'GQL' }] },
   };
@@ -54,27 +60,31 @@ const run = async () => {
   t('delay defaults applied', [p.getRule(p.delays, "gql:OldDelay:*", "site").delayMs, p.getRule(p.delays, "gql:OldDelay:*", "site").delayBefore, p.getRule(p.delays, "gql:OldDelay:*", "site").enabled], [15000, true, true]);
   t('delay migration flagged', d.migrated, true);
 
+  t('legacy site map removed after migration', 'overrides' in store, false);
+  t('legacy blocked map removed after migration', 'blockedCalls' in store, false);
+  t('other origin bucket created by migration', store['overrides::https://site-c.test'].map(x => x.key), ['gql:OtherSite']);
+
   p.saveOverrides();
   await p.flushWrites();
-  t('site override written under origin', store.overrides['https://site-a.test'].map(x => x.key), ['gql:OldOverride:*']);
+  t('site override written under origin bucket', store['overrides::https://site-a.test'].map(x => x.key), ['gql:OldOverride:*']);
   t('global override written to global list', store.overridesGlobal.map(x => x.key), ['gql:GlobalOverride:aaaaaaaa']);
   t('global entry has no scopeOrigin on disk', 'scopeOrigin' in store.overridesGlobal[0], false);
 
-  store.overrides['https://site-b.test'] = [{ key: 'gql:SiteB:bbbbbbbb', callName: 'B', type: 'GQL', enabled: true, responseBodyOverrideEnabled: true }];
+  store['overrides::https://site-b.test'] = [{ key: 'gql:SiteB:bbbbbbbb', callName: 'B', type: 'GQL', enabled: true, responseBodyOverrideEnabled: true }];
   p.currentOrigin = 'https://site-b.test';
   p.overrides = (await p.loadStore('overrides', (raw, scope) => p.normalizeOverride(raw, scope))).entries;
   t('site-b sees only its own + global', Array.from(p.overrides.keys()).sort(), ["global|gql:GlobalOverride:aaaaaaaa", "site|gql:SiteB:bbbbbbbb"]);
 
   p.saveOverrides();
   await p.flushWrites();
-  t('saving on site-b preserves site-a data', store.overrides['https://site-a.test'].map(x => x.key), ['gql:OldOverride:*']);
+  t('saving on site-b preserves site-a data', store['overrides::https://site-a.test'].map(x => x.key), ['gql:OldOverride:*']);
   t('saving on site-b keeps globals once', store.overridesGlobal.length, 1);
 
   const b1 = p.getRule(p.overrides, "gql:SiteB:bbbbbbbb", "site");
   p.applyRuleScope(p.overrides, p.ruleId(b1), b1, "global");
   p.saveOverrides();
   await p.flushWrites();
-  t('site bucket emptied after promoting to global', 'https://site-b.test' in store.overrides, false);
+  t('site bucket emptied after promoting to global', 'overrides::https://site-b.test' in store, false);
   t('globals now hold both', store.overridesGlobal.map(x => x.key).sort(), ['gql:GlobalOverride:aaaaaaaa', 'gql:SiteB:bbbbbbbb']);
 
   p.storeLoaded = false;
@@ -92,11 +102,23 @@ const run = async () => {
   p.saveOverrides();
   await p.flushWrites();
   t('origin-less save persists globals', store.overridesGlobal.map(x => x.key).includes('gql:New:cccccccc'), true);
-  t('origin-less save leaves the site map alone', store.overrides['https://site-a.test'].map(x => x.key), ['gql:OldOverride:*']);
+  t('origin-less save leaves site buckets alone', store['overrides::https://site-a.test'].map(x => x.key), ['gql:OldOverride:*']);
+
+  const warnings = [];
+  const origAddEvent = p.addEvent;
+  p.addEvent = (type, msg) => warnings.push([type, msg]);
+  p.siteRulesWarningShown = false;
+  p.setRule(p.overrides, { key: 'gql:Orphan:dddddddd', scope: 'site', enabled: true });
+  p.saveOverrides();
+  await p.flushWrites();
+  p.saveOverrides();
+  await p.flushWrites();
+  t('origin-less site rule warns visibly, once', warnings.filter(w => w[0] === 'warning').length, 1);
+  p.addEvent = origAddEvent;
 
   store = {
     overridesGlobal: [{ key: 'gql:Both:aaaaaaaa', callName: 'GLOBAL', type: 'GQL', enabled: true, responseBodyOverrideEnabled: true }],
-    overrides: { 'https://site-a.test': [{ key: 'gql:Both:aaaaaaaa', callName: 'SITE', type: 'GQL', enabled: true, responseBodyOverrideEnabled: true }] },
+    'overrides::https://site-a.test': [{ key: 'gql:Both:aaaaaaaa', callName: 'SITE', type: 'GQL', enabled: true, responseBodyOverrideEnabled: true }],
   };
   p.currentOrigin = 'https://site-a.test';
   p.storeLoaded = false;
@@ -109,7 +131,20 @@ const run = async () => {
   await p.flushWrites();
   t('saving does not destroy the global twin', store.overridesGlobal.map(x => x.callName), ['GLOBAL']);
   t('saving does not destroy the site twin',
-    store.overrides['https://site-a.test'].map(x => x.callName), ['SITE']);
+    store['overrides::https://site-a.test'].map(x => x.callName), ['SITE']);
+
+  store = {
+    overrides: { 'https://site-a.test': [{ key: 'gql:Stale:aaaaaaaa', callName: 'STALE', type: 'GQL' }] },
+    'overrides::https://site-a.test': [{ key: 'gql:Fresh:bbbbbbbb', callName: 'FRESH', type: 'GQL', enabled: true, responseBodyOverrideEnabled: true }],
+  };
+  p.storeLoaded = false;
+  p.overrides = (await p.loadStore('overrides', (raw, scope) => p.normalizeOverride(raw, scope))).entries;
+  p.storeLoaded = true;
+  t('interrupted migration keeps the existing bucket on disk',
+    store['overrides::https://site-a.test'].map(x => x.callName), ['FRESH']);
+  t('interrupted migration still loads both sources',
+    Array.from(p.overrides.values()).map(x => x.callName).sort(), ['FRESH', 'STALE']);
+  t('legacy map removed after interrupted migration', 'overrides' in store, false);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
