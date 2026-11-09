@@ -18,6 +18,7 @@ A Chrome DevTools extension for monitoring, analyzing, and debugging network req
 - 🐢 **Request Delay** - Delay a request before it is sent, or hold its response, to test loading states and timeouts
 - 🌐 **Scoping** - Every block, override, and delay applies either to the current origin or to all sites. A site rule and an all-sites rule can both exist for the same call; the site rule wins
 - 📥 **Import/Export** - Import and export override configurations
+- 💬 **Feedback** - Report a bug, share an idea, or send praise without leaving the panel
 
 ## 📦 Installation
 
@@ -57,6 +58,7 @@ If a call is already covered by an existing rule, these buttons open that rule i
 
 - **Clear** - Remove all captured requests
 - **Recording** - Toggle request capture on/off
+- **Feedback** - Open the feedback form (top right) and pick Bug, Idea, or Praise
 
 ### Managing Blocked Calls
 
@@ -91,6 +93,16 @@ If a call is already covered by an existing rule, these buttons open that rule i
 - Blocking, overrides, and delays require the debugger, so Chrome shows a "started debugging this browser" banner while any rule is active. It detaches automatically once the last rule is removed or disabled.
 - Request bodies above Chrome's inspection limit cannot be matched; the status drawer logs a warning when this happens.
 
+## 💬 Feedback
+
+The **Feedback** button uses the [LT3](https://lt3.onrender.com/#/docs) widget.
+
+- Submissions go to the LT3 dashboard, labelled with the panel tab they were sent from (`network`, `blocked`, `overrides`, `delays`)
+- Each submission carries the feedback type, the message, an optional email, the browser user agent, and the panel's own `chrome-extension://` URL. No captured network data or inspected page URL is sent
+- The widget is vendored at `panel/vendor/lt3.js` because Manifest V3 does not allow remote scripts. To update it, replace that file with the latest `widget/v1/lt3.js` from LT3
+- The public key and API host live on the widget `<script>` tag in `panel/panel.html`
+- If LT3 allowed origins are configured for the app, they must include `chrome-extension://<extension id>`
+
 ## 📁 Project Structure
 
 ```
@@ -104,7 +116,9 @@ NetworkWizard/
 │   ├── panel.css      # Styles
 │   ├── panel.js       # Panel logic
 │   ├── json-editor.js # Tree/text JSON viewer & editor
-│   └── json-editor.css
+│   ├── json-editor.css
+│   └── vendor/
+│       └── lt3.js     # LT3 feedback widget (vendored)
 ├── test/              # Regression suites (no dependencies)
 │   ├── harness.js     # chrome.* stubs + shared panel instance
 │   └── dom.js         # Minimal DOM used by the render tests

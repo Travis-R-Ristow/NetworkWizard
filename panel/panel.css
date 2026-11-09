@@ -23,6 +23,15 @@
   --space-xs: 4px;
   --space-sm: 8px;
   --space-md: 16px;
+  --lt3-bg: var(--color-bg-elevated);
+  --lt3-surface: var(--color-bg);
+  --lt3-text: var(--color-text);
+  --lt3-text-muted: var(--color-text-muted);
+  --lt3-border: var(--color-border);
+  --lt3-radius: 8px;
+  --lt3-font: var(--font-sans);
+  --lt3-overlay: rgba(0, 0, 0, 0.6);
+  --lt3-danger: var(--color-error);
 }
 
 * {
@@ -171,6 +180,12 @@ body.tinted .identity-name {
   display: flex;
   align-items: center;
   gap: var(--space-md);
+}
+
+.header-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--color-border);
 }
 
 .header-tabs {

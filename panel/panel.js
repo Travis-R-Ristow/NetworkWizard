@@ -289,6 +289,7 @@ class NetworkWizardPanel {
     this.identity = { name: "", color: null };
     this.elements = {
       clearBtn: document.getElementById("clearBtn"),
+      feedbackBtn: document.getElementById("feedbackBtn"),
       recordToggle: document.getElementById("recordToggle"),
       searchInput: document.getElementById("searchInput"),
       filterBar: document.querySelector(".filter-bar"),
@@ -752,6 +753,14 @@ class NetworkWizardPanel {
   }
 
   bindEvents() {
+    document.body.addEventListener("keydown", (e) =>
+      this.keepShadowTypingFromDevTools(e),
+    );
+    this.elements.feedbackBtn.addEventListener(
+      "click",
+      (e) => this.openFeedback(e),
+      true,
+    );
     this.elements.clearBtn.addEventListener("click", () => this.clear());
     this.elements.recordToggle.addEventListener("change", (e) =>
       this.toggleRecording(e.target.checked),
@@ -818,6 +827,35 @@ class NetworkWizardPanel {
         this.elements.identityPopover.classList.add("hidden");
       }
     });
+  }
+
+  openFeedback(e) {
+    if (!window.LT3) {
+      return;
+    }
+
+    e.stopPropagation();
+    window.LT3.open({ label: this.currentView });
+  }
+
+  keepShadowTypingFromDevTools(e) {
+    if (e.key === "Escape" || e.ctrlKey || e.altKey || e.metaKey) {
+      return;
+    }
+
+    const origin = e.composedPath()[0];
+    if (!origin || origin === e.target) {
+      return;
+    }
+
+    const isEditable =
+      origin.nodeName === "INPUT" ||
+      origin.nodeName === "TEXTAREA" ||
+      origin.isContentEditable === true;
+
+    if (isEditable) {
+      e.stopPropagation();
+    }
   }
 
   renderIdentitySwatches() {
